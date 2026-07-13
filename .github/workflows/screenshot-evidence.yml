@@ -441,6 +441,8 @@ jobs:
 
       - name: Collect Maestro debug output (on sign-in failure)
         if: steps.signin.outcome != 'success'
+        timeout-minutes: 5
+        continue-on-error: true
         run: |
           echo "::warning::sign-in did not complete — the screenshot shows where it stalled"
           mkdir -p screenshots/maestro-debug
