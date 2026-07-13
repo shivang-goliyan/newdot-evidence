@@ -24,7 +24,11 @@ const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
 // < > -> &lt; &gt;, © -> &copy; and ' -> &#39;. An earlier attempt used `Bob's R&D "Q3"` and came
 // back completely unencoded — so a bare ampersand is NOT what triggers this, and guessing at the
 // characters cost a run. These are the ones the report itself proves get encoded.
-const NEW_TITLE = process.env.NEW_TITLE ?? `John's <Internal> £100 © R&D`;
+// NewDot's title field REJECTS < and > with "Invalid character" (client-side validation), so the
+// `Risk Assessment &lt;Internal&gt;` report in the issue's screenshot cannot have been typed into
+// NewDot at all — it came from another write path. £ and © are accepted, and the same screenshot
+// proves both get stored encoded (&#163;, &copy;).
+const NEW_TITLE = process.env.NEW_TITLE ?? `John's £100 © R&D`;
 const SEARCH_ROUTE = "/search?q=" + encodeURIComponent("type:expense-report");
 
 if (!EMAIL) {
@@ -128,8 +132,16 @@ try {
 
   const save = page.getByRole("button", { name: /save|done/i }).last();
   await save.click({ timeout: 20_000 });
-  await page.waitForTimeout(8_000);
+  await page.waitForTimeout(5_000);
   await shoot(page, "5-saved");
+
+  // The field validates client-side. A rejected value leaves the form up with an inline error and
+  // saves NOTHING — which previously looked like a mysterious "the rename didn't stick".
+  const invalid = page.getByText(/invalid character|cannot be|too long/i).first();
+  if (await invalid.isVisible().catch(() => false)) {
+    throw new Error(`the title was REJECTED by validation: ${await invalid.textContent()}`);
+  }
+  await page.waitForTimeout(5_000);
 
   // Force the server value: a full reload discards the optimistic (raw) Onyx write.
   console.log("=== reloading to pull the SERVER-encoded name ===");
