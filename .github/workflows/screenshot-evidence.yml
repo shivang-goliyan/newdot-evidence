@@ -9,14 +9,14 @@
 #   gh workflow run screenshot-evidence.yml --repo <you>/newdot-evidence \
 #      -f source_repo=shivang-goliyan/App -f target_ref=<fix-branch> -f route=/search
 #
-# Secrets required on the fork (Settings → Secrets → Actions):
+# Secrets required (Settings → Secrets and variables → Actions):
 #   EXPENSIFY_EMAIL     the account to sign in as
 #   IMAP_USER           mailbox that receives its magic codes (e.g. you@gmail.com)
 #   IMAP_APP_PASSWORD   Gmail App Password (a normal password will NOT work)
 #
 # Use a DEDICATED test Expensify account, not your personal one. The dev server proxies to the
 # PRODUCTION API, so this signs into a real account and any action it takes is real. And on a
-# public fork, run logs and uploaded artifacts are world-readable — never capture anything you
+# public repo, run logs and published evidence are world-readable — never capture anything you
 # would not paste into the PR itself.
 name: Screenshot evidence
 
@@ -49,14 +49,39 @@ on:
         type: boolean
 
 permissions:
-  # Needed to commit the captured evidence to the `evidence` branch (see the publish step):
-  # a PR body cannot embed a build artifact, only a URL.
+  # Needed by the publish job: a PR body cannot embed a build artifact, only a URL.
   contents: write
 
 jobs:
-  web:
-    # Standard runners are free and unlimited on public repos — a failed run costs nothing.
-    runs-on: ubuntu-latest
+  capture:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The PR template's "MacOS: Chrome / Safari" row wants BOTH engines on a Mac. A viewport
+          # screenshot is identical on any OS (it has no window chrome), so the mac jobs also grab
+          # the whole screen — menu bar and traffic lights are what actually evidence "on a Mac".
+          - {
+              os: ubuntu-latest,
+              label: web-chrome,
+              browser: chromium,
+              desktop: "false",
+            }
+          - {
+              os: macos-latest,
+              label: macos-chrome,
+              browser: chromium,
+              desktop: "true",
+            }
+          - {
+              os: macos-latest,
+              label: macos-safari,
+              browser: webkit,
+              desktop: "true",
+            }
+    name: ${{ matrix.label }}
+    # Free and unlimited on public repos, macOS included — a failed run costs nothing.
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
       - name: Checkout CI scripts (this branch)
@@ -87,11 +112,19 @@ jobs:
         working-directory: app
         run: |
           echo "127.0.0.1 dev.new.expensify.com" | sudo tee -a /etc/hosts
-          sudo apt-get update && sudo apt-get install -y libnss3-tools
-          curl -sJLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
-          chmod +x mkcert-v*-linux-amd64
-          sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
-          npm run setup-https
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y libnss3-tools ffmpeg
+            curl -sJLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+            chmod +x mkcert-v*-linux-amd64
+            sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+          else
+            brew install mkcert ffmpeg
+          fi
+          # Trust-store install is best-effort — Playwright ignores cert errors anyway; what we
+          # actually need is the pem pair the webpack dev server reads.
+          mkcert -install || true
+          mkcert -cert-file config/webpack/certificate.pem -key-file config/webpack/key.pem \
+                 dev.new.expensify.com localhost 127.0.0.1
 
       - name: Start the dev server
         working-directory: app
@@ -109,10 +142,7 @@ jobs:
         working-directory: ci/scripts
         run: |
           npm install
-          npx playwright install --with-deps chromium
-          # Not on the ubuntu runner image by default, and Playwright only records webm —
-          # which GitHub will not play. Without this the video falls back to a raw .webm.
-          sudo apt-get install -y ffmpeg
+          npx playwright install --with-deps ${{ matrix.browser }}
 
       - name: Capture
         working-directory: ci/scripts
@@ -123,54 +153,69 @@ jobs:
           ROUTE: ${{ inputs.route }}
           VIEWPORT: ${{ inputs.viewport }}
           RECORD: ${{ inputs.record }}
+          BROWSER: ${{ matrix.browser }}
+          LABEL: ${{ matrix.label }}
+          DESKTOP: ${{ matrix.desktop }}
           OUT_DIR: ${{ github.workspace }}/screenshots
         run: node capture.mjs
-
-      # A PR body cannot embed an artifact — it needs a URL GitHub will render. Committing the
-      # evidence to an orphan `evidence` branch gives permanent raw.githubusercontent.com links
-      # that outlive artifact retention and do not depend on any server of ours staying up.
-      - name: Publish evidence and print the PR-ready markdown
-        if: success()
-        working-directory: ci
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEST: evidence/${{ inputs.target_ref }}-${{ github.run_id }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin evidence && git checkout evidence || git checkout --orphan evidence
-          git rm -rqf . 2>/dev/null || true
-          mkdir -p "${DEST}"
-          cp "${GITHUB_WORKSPACE}"/screenshots/* "${DEST}/"
-          git add "${DEST}"
-          git commit -qm "evidence: ${{ inputs.target_ref }} (run ${{ github.run_id }})"
-          git push -q origin evidence
-          BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/evidence/${DEST}"
-          {
-            echo "### Paste into the PR"
-            echo
-            for f in "${GITHUB_WORKSPACE}"/screenshots/*; do
-              n=$(basename "$f")
-              case "$n" in
-                *.png) echo "![${n%.*}](${BASE}/${n})" ;;
-                # GitHub renders a <video> tag from a raw URL; markdown image syntax will not.
-                *.mp4|*.webm) echo "<video src=\"${BASE}/${n}\" controls></video>" ;;
-              esac
-              echo
-            done
-          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Dev server log (on failure)
         if: failure()
         run: tail -100 "${RUNNER_TEMP}/web.log" || true
 
-      - name: Upload screenshots
+      - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: screenshots-${{ inputs.target_ref }}
+          name: evidence-${{ matrix.label }}
           path: screenshots/
           if-no-files-found: warn
-          # Artifacts on a public repo are world-downloadable, but the capture account is a
-          # throwaway with no real data, so a working window beats a paranoid one.
           retention-days: 14
+
+  # A PR body cannot embed an artifact — it needs a URL GitHub will render. Publishing to an
+  # `evidence` branch yields permanent raw.githubusercontent.com links that outlive artifact
+  # retention and depend on no server of ours. One job does it so the matrix cannot race on a push.
+  publish:
+    needs: capture
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: incoming
+          merge-multiple: true
+
+      - name: Publish and print the PR-ready markdown
+        env:
+          DEST: evidence/${{ inputs.target_ref }}-${{ github.run_id }}
+        run: |
+          shopt -s nullglob
+          files=(incoming/*)
+          if [ ${#files[@]} -eq 0 ]; then echo "nothing captured"; exit 0; fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin evidence && git checkout evidence || git checkout --orphan evidence
+          git rm -rqf . 2>/dev/null || true
+          mkdir -p "${DEST}"
+          cp incoming/* "${DEST}/"
+          git add "${DEST}"
+          git commit -qm "evidence: ${{ inputs.target_ref }} (run ${{ github.run_id }})"
+          git push -q origin evidence
+
+          BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/evidence/${DEST}"
+          {
+            echo "### Paste into the PR"
+            echo
+            for f in "${DEST}"/*; do
+              n=$(basename "$f")
+              case "$n" in
+                *.png) echo "![${n%.*}](${BASE}/${n})" ;;
+                # GitHub renders a <video> tag from a raw URL; image syntax will not play it.
+                *.mp4) echo "<video src=\"${BASE}/${n}\" controls></video>" ;;
+              esac
+              echo
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"

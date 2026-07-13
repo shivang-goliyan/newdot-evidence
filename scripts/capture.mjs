@@ -7,18 +7,25 @@
  * a stale email can't satisfy the poll.
  *
  * Env: APP_URL, EXPENSIFY_EMAIL, ROUTE (post-login path), VIEWPORT ("1512x982"), OUT_DIR,
- *      RECORD ("true" to also produce an mp4 of the session).
+ *      RECORD ("true" to also produce an mp4 of the session), BROWSER ("chromium"|"webkit"),
+ *      LABEL (output file stem), DESKTOP ("true" to also grab the whole macOS screen).
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
-import { chromium } from "playwright";
+import { chromium, webkit } from "playwright";
 
 const APP_URL = process.env.APP_URL ?? "https://dev.new.expensify.com:8082";
 const EMAIL = process.env.EXPENSIFY_EMAIL;
 const ROUTE = process.env.ROUTE ?? "/";
 const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
 const RECORD = process.env.RECORD === "true";
+const BROWSER = process.env.BROWSER ?? "chromium";
+const LABEL = process.env.LABEL ?? "web-chrome";
+// A viewport screenshot looks the same on every OS — it has no window chrome. Grabbing the whole
+// macOS screen (menu bar + traffic lights + the browser's own UI) is what actually EVIDENCES
+// "this ran on a Mac in Chrome/Safari", which is the point of that row in the PR template.
+const DESKTOP = process.env.DESKTOP === "true";
 const [width, height] = (process.env.VIEWPORT ?? "1512x982")
   .split("x")
   .map(Number);
@@ -61,7 +68,9 @@ async function dismissModals(page) {
   }
 }
 
-const browser = await chromium.launch();
+const engine = BROWSER === "webkit" ? webkit : chromium;
+// Headed when we intend to photograph the screen — a headless browser draws no window to photograph.
+const browser = await engine.launch({ headless: !DESKTOP });
 // The dev server uses a locally-generated mkcert certificate the runner does not trust.
 const context = await browser.newContext({
   viewport: { width, height },
@@ -78,6 +87,12 @@ const context = await browser.newContext({
     : {}),
 });
 const page = await context.newPage();
+
+// Recording starts when the context does, so the sign-in — including the magic code being
+// typed in — is on the front of the tape. We remember when the app became usable and cut
+// everything before it, so the published video never shows the OTP.
+const recordingStartedAt = Date.now();
+let appReadyAt = null;
 
 try {
   console.log(`opening ${APP_URL}`);
@@ -110,6 +125,9 @@ try {
   // would sit on top of whatever the PR is meant to show, so clear whatever is up.
   await dismissModals(page);
 
+  // Everything recorded up to here is sign-in (magic code included) — the video is cut here.
+  appReadyAt = Date.now();
+
   if (ROUTE !== "/") {
     await page.goto(`${APP_URL}${ROUTE}`, { waitUntil: "domcontentloaded" });
     await dismissModals(page);
@@ -118,8 +136,21 @@ try {
   await page
     .waitForLoadState("networkidle", { timeout: 60_000 })
     .catch(() => {});
-  await shoot(page, "web-chrome");
-  console.log(`captured ${OUT_DIR}/web-chrome.png`);
+  await shoot(page, LABEL);
+  console.log(`captured ${OUT_DIR}/${LABEL}.png`);
+
+  if (DESKTOP) {
+    // -x = no shutter sound. Captures the real desktop: macOS menu bar, window controls, browser UI.
+    // Screen capture can be denied by TCC on a CI host, and that must not lose the viewport shot
+    // we already have — so a failure here is logged, not thrown.
+    const shot = path.join(OUT_DIR, `${LABEL}-desktop.png`);
+    try {
+      execFileSync("screencapture", ["-x", shot]);
+      console.log(`captured ${shot} (full macOS screen)`);
+    } catch (e) {
+      console.log(`desktop capture unavailable: ${e.message}`);
+    }
+  }
 } catch (error) {
   await shoot(page, "failure").catch(() => {});
   throw error;
@@ -129,15 +160,26 @@ try {
   await context.close();
   if (video) {
     const webm = await video.path();
-    const mp4 = path.join(OUT_DIR, "web-chrome.mp4");
+    const mp4 = path.join(OUT_DIR, `${LABEL}.mp4`);
+    // Drop the sign-in from the front of the tape. If we never got that far (a failure run),
+    // publish nothing rather than a video of the magic code being typed.
+    const skip = appReadyAt ? (appReadyAt - recordingStartedAt) / 1000 : null;
     try {
-      // GitHub's PR composer plays mp4 inline; it will not render a .webm.
+      if (skip === null) {
+        throw new Error(
+          "never reached the app — refusing to publish the sign-in footage",
+        );
+      }
+      // -ss AFTER -i so the cut is frame-accurate (before -i it seeks to the nearest keyframe).
+      // mp4 because GitHub plays it inline and will not render a .webm.
       execFileSync(
         "ffmpeg",
         [
           "-y",
           "-i",
           webm,
+          "-ss",
+          skip.toFixed(2),
           "-movflags",
           "faststart",
           "-pix_fmt",
@@ -148,14 +190,12 @@ try {
           stdio: "ignore",
         },
       );
-      console.log(`recorded ${mp4}`);
-      rmSync(path.join(OUT_DIR, "raw-video"), { recursive: true, force: true });
-    } catch {
-      // No ffmpeg (or a bad encode) should never lose the evidence — keep the raw webm.
-      renameSync(webm, path.join(OUT_DIR, "web-chrome.webm"));
-      console.log("ffmpeg unavailable — kept the raw .webm");
-      rmSync(path.join(OUT_DIR, "raw-video"), { recursive: true, force: true });
+      console.log(`recorded ${mp4} (trimmed ${skip.toFixed(1)}s of sign-in)`);
+    } catch (e) {
+      console.log(`video not published: ${e.message}`);
     }
+    // The raw webm always holds the sign-in, so it never survives the run.
+    rmSync(path.join(OUT_DIR, "raw-video"), { recursive: true, force: true });
   }
   await browser.close();
 }
