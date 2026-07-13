@@ -70,7 +70,22 @@ async function dismissModals(page) {
 
 const engine = BROWSER === "webkit" ? webkit : chromium;
 // Headed when we intend to photograph the screen — a headless browser draws no window to photograph.
-const browser = await engine.launch({ headless: !DESKTOP });
+const browser = await engine.launch({
+  headless: !DESKTOP,
+  // Chrome's Cast/mDNS discovery makes macOS raise a "find devices on local networks?" system
+  // dialog, which lands on top of the app in the desktop screenshot. Turn the discovery off
+  // rather than try to dismiss a dialog we do not have Accessibility rights to click.
+  ...(BROWSER === "chromium"
+    ? {
+        args: [
+          "--disable-features=MediaRouter",
+          "--disable-background-networking",
+          "--no-first-run",
+          "--no-default-browser-check",
+        ],
+      }
+    : {}),
+});
 // The dev server uses a locally-generated mkcert certificate the runner does not trust.
 const context = await browser.newContext({
   viewport: { width, height },

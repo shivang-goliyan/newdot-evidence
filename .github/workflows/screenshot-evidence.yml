@@ -121,6 +121,19 @@ jobs:
           # path we pin here goes stale silently and the server fails to bind.
           npm run setup-https
 
+      # The macOS runner's virtual display defaults to 1024x768, so the browser window is wider
+      # than the screen and the desktop proof-shot shows a cropped app. Best-effort: nothing here
+      # is fatal, and the (independent) viewport screenshot is full-size either way.
+      - name: Widen the macOS display
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          brew install displayplacer
+          displayplacer list | grep -E "Persistent screen id|^mode.*1920x1080|current mode" | head -5
+          SCREEN=$(displayplacer list | awk '/Persistent screen id:/ {print $4; exit}')
+          displayplacer "id:${SCREEN} res:1920x1080 scaling:off origin:(0,0) degree:0"
+          system_profiler SPDisplaysDataType | grep -i resolution || true
+
       - name: Start the dev server
         working-directory: app
         run: |
