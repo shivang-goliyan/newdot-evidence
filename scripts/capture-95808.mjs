@@ -25,7 +25,7 @@ const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
 const LABEL = process.env.LABEL ?? "before";
 // Matched against the row text to find the seeded report. Deliberately a fragment that survives
 // BOTH states: "R&amp;D" (buggy) and "R&D" (fixed) both contain "Bob".
-const TITLE_MATCH = process.env.SEED_TITLE_MATCH ?? "Bob";
+const TITLE_MATCH = process.env.SEED_TITLE_MATCH ?? "John";
 // The Search list of expense reports — the surface that renders ExpenseReportListItemRow*.
 const SEARCH_ROUTE = "/search?q=" + encodeURIComponent("type:expense-report");
 

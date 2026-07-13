@@ -20,7 +20,11 @@ import { chromium } from "playwright";
 const APP_URL = process.env.APP_URL ?? "https://dev.new.expensify.com:8082";
 const EMAIL = process.env.EXPENSIFY_EMAIL;
 const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
-const NEW_TITLE = process.env.NEW_TITLE ?? `Bob's R&D "Q3"`;
+// Characters chosen from the ACTUAL bug screenshot on the issue, which shows £ -> &#163;,
+// < > -> &lt; &gt;, © -> &copy; and ' -> &#39;. An earlier attempt used `Bob's R&D "Q3"` and came
+// back completely unencoded — so a bare ampersand is NOT what triggers this, and guessing at the
+// characters cost a run. These are the ones the report itself proves get encoded.
+const NEW_TITLE = process.env.NEW_TITLE ?? `John's <Internal> £100 © R&D`;
 const SEARCH_ROUTE = "/search?q=" + encodeURIComponent("type:expense-report");
 
 if (!EMAIL) {
@@ -133,13 +137,13 @@ try {
   await page.waitForTimeout(15_000);
   await shoot(page, "6-after-reload");
 
-  const renamed = page.getByText(/Bob/i).first();
+  const renamed = page.getByText(/John/i).first();
   if (await renamed.isVisible().catch(() => false)) {
     console.log(
       `SEEDED. list now renders: ${JSON.stringify(await renamed.textContent())}`,
     );
   } else {
-    console.log("WARNING: no row matching /Bob/ — the rename may not have saved");
+    console.log("WARNING: no row matching /John/ — the rename may not have saved");
   }
 } catch (error) {
   await shoot(page, "failure").catch(() => {});
