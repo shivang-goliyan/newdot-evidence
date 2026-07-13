@@ -116,16 +116,10 @@ jobs:
           else
             brew install mkcert ffmpeg
           fi
-          # Trust-store install is best-effort — Playwright ignores cert errors anyway; what we
-          # actually need is the pem pair the webpack dev server reads. Absolute paths: mkcert
-          # resolves -cert-file against ITS OWN cwd, which is not reliably this step's.
-          CERTS="${GITHUB_WORKSPACE}/app/config/webpack"
-          echo "pwd=$(pwd)  certs=${CERTS}"
-          mkdir -p "${CERTS}"
-          mkcert -install || true
-          mkcert -cert-file "${CERTS}/certificate.pem" -key-file "${CERTS}/key.pem" \
-                 dev.new.expensify.com localhost 127.0.0.1
-          ls -la "${CERTS}"/*.pem
+          # Always use the REPO'S OWN script, never a hardcoded cert path: the dev server moved
+          # from webpack to rsbuild and the pem location moved with it (config/rsbuild/), so any
+          # path we pin here goes stale silently and the server fails to bind.
+          npm run setup-https
 
       - name: Start the dev server
         working-directory: app
