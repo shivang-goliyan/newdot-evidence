@@ -1,0 +1,18 @@
+# Stage 1 of sign-in: submit the email and stop.
+#
+# Sign-in is split across two flows because the magic code does not exist yet when this one runs —
+# it is emailed only once the address is submitted. The runner fetches it from the inbox in between
+# (magic_code.py) and feeds it to ios-02-code.yaml. A single flow could not wait for that.
+appId: ${APP_ID}
+---
+- launchApp:
+    clearState: true
+
+# The splash screen sits over the app for a while on a cold simulator boot.
+- extendedWaitUntil:
+    visible: "Phone or email"
+    timeout: 120000
+
+- tapOn: "Phone or email"
+- inputText: ${EMAIL}
+- tapOn: "Continue"

@@ -1,0 +1,28 @@
+# Stage 2 of sign-in: type the magic code the runner just pulled from the inbox, then clear whatever
+# modal a fresh account is greeted with, so the screenshot shows the app and not a promo.
+#
+# The screenshot itself is taken by the workflow (`simctl io booted screenshot`), not here: simctl
+# captures the whole device frame, which is what the PR template's iOS row wants to see.
+appId: ${APP_ID}
+---
+- extendedWaitUntil:
+    visible: "Magic code"
+    timeout: 120000
+
+# The code field autofocuses; typing fills its per-digit inputs in order.
+- inputText: ${CODE}
+
+# The LHN header is the first thing that renders once the session is real.
+- extendedWaitUntil:
+    visible: "Inbox"
+    timeout: 180000
+
+# A fresh account gets promo/onboarding modals that would cover whatever the PR is meant to show.
+# optional: true — on an account that has already onboarded there is nothing to dismiss, and that
+# must not fail the flow.
+- runFlow:
+    when:
+      visible: "Close"
+    commands:
+      - tapOn: "Close"
+      - waitForAnimationToEnd

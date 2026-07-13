@@ -7,7 +7,8 @@
 # are free and unlimited on public repos, and metered 10x on private ones.
 #
 #   gh workflow run screenshot-evidence.yml --repo <you>/newdot-evidence \
-#      -f source_repo=shivang-goliyan/App -f target_ref=<fix-branch> -f route=/search
+#      -f source_repo=shivang-goliyan/App -f target_ref=<fix-branch> -f route=/search \
+#      -f platforms=web,macos,ios-native
 #
 # Secrets required (Settings → Secrets and variables → Actions):
 #   EXPENSIFY_EMAIL     the account to sign in as
@@ -32,6 +33,11 @@ on:
         description: "Branch or SHA of the fix to screenshot"
         required: true
         type: string
+      platforms:
+        description: "Comma-separated: web, macos, ios-native"
+        required: false
+        default: "web,macos"
+        type: string
       route:
         description: "Route to open after sign-in (e.g. /search)"
         required: false
@@ -53,28 +59,39 @@ permissions:
   contents: write
 
 jobs:
+  # A matrix leg cannot be skipped with `if`, so the browser legs are computed here instead: asking
+  # for ios-native alone must not drag a browser run along with it (and vice versa), or every
+  # iteration on one platform pays for the others.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      browsers: ${{ steps.pick.outputs.browsers }}
+    steps:
+      - id: pick
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          legs='[]'
+          # The PR template has ONE "MacOS: Chrome / Safari" row, so Chrome satisfies it and a second
+          # macOS runner for Safari is wasted. (browser=webkit still works if a Safari-only bug needs it.)
+          if [[ ",${PLATFORMS}," == *",web,"* ]]; then
+            legs=$(jq -c '. += [{"os":"ubuntu-latest","label":"web-chrome","browser":"chromium","desktop":"false"}]' <<< "$legs")
+          fi
+          # A viewport screenshot is identical on any OS (no window chrome), so the mac leg also grabs
+          # the whole screen: the menu bar and traffic lights are what evidence "on a Mac".
+          if [[ ",${PLATFORMS}," == *",macos,"* ]]; then
+            legs=$(jq -c '. += [{"os":"macos-latest","label":"macos-chrome","browser":"chromium","desktop":"true"}]' <<< "$legs")
+          fi
+          echo "browsers=${legs}" >> "$GITHUB_OUTPUT"
+          echo "browser legs: ${legs}"
+
   capture:
+    needs: plan
+    if: needs.plan.outputs.browsers != '[]'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # The PR template has ONE "MacOS: Chrome / Safari" row and one <details> block — either
-          # browser satisfies it, so we run Chrome and skip a second macOS runner. A viewport
-          # screenshot is identical on any OS (it has no window chrome), so the mac job also grabs
-          # the whole screen: the menu bar and traffic lights are what evidence "on a Mac".
-          # (BROWSER=webkit still works if a Safari-specific bug ever needs it.)
-          - {
-              os: ubuntu-latest,
-              label: web-chrome,
-              browser: chromium,
-              desktop: "false",
-            }
-          - {
-              os: macos-latest,
-              label: macos-chrome,
-              browser: chromium,
-              desktop: "true",
-            }
+        include: ${{ fromJSON(needs.plan.outputs.browsers) }}
     name: ${{ matrix.label }}
     # Free and unlimited on public repos, macOS included — a failed run costs nothing.
     runs-on: ${{ matrix.os }}
@@ -129,10 +146,8 @@ jobs:
         continue-on-error: true
         run: |
           brew install displayplacer
-          displayplacer list | grep -E "Persistent screen id|^mode.*1920x1080|current mode" | head -5
           SCREEN=$(displayplacer list | awk '/Persistent screen id:/ {print $4; exit}')
           displayplacer "id:${SCREEN} res:1920x1080 scaling:off origin:(0,0) degree:0"
-          system_profiler SPDisplaysDataType | grep -i resolution || true
 
       - name: Start the dev server
         working-directory: app
@@ -180,11 +195,186 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  # iOS: Native — the row that normally forces you to own a Mac.
+  #
+  # A SIMULATOR build needs no code signing, no certificates and no Apple Developer account
+  # (CODE_SIGNING_ALLOWED=NO), and `New Expensify Dev` is a standalone NewDot scheme, so the
+  # Mobile-Expensify submodule is never checked out. Upstream builds exactly this scheme/config in
+  # .github/workflows/remote-build-ios.yml — but through a paid remote-build service, which we
+  # replace with a plain xcodebuild.
+  ios-native:
+    if: contains(inputs.platforms, 'ios-native')
+    name: ios-native
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout CI scripts (this branch)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout the fix
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.target_ref }}
+          path: app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # Unlike web, the native build BAKES its config in at build time (react-native-config), so it
+      # needs a .env to exist. Do NOT copy .env.example: it points EXPENSIFY_URL at
+      # https://www.expensify.com.dev/ — a LOCAL backend that does not exist on a runner — and
+      # sign-in would fail against it. Every key CONFIG.ts reads has a production default, so an
+      # almost-empty file reproduces exactly the production config the web leg gets with no .env.
+      - name: Write a production .env
+        run: printf 'ENVIRONMENT=development\n' > app/.env
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: app
+          bundler-cache: true
+
+      - name: Cache Pods
+        uses: actions/cache@v4
+        with:
+          path: app/ios/Pods
+          key: pods-${{ hashFiles('app/ios/Podfile.lock') }}
+
+      - name: Pod install
+        working-directory: app
+        # The repo's own script; it needs yq (jq is preinstalled on the runner image).
+        run: |
+          brew install yq
+          npm run pod-install
+
+      # The first build is the slow one (~40 min). Caching DerivedData makes every later run cheap,
+      # which is what makes iterating on the sign-in automation affordable.
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/dd
+          key: dd-${{ hashFiles('app/ios/Podfile.lock') }}-${{ inputs.target_ref }}
+          restore-keys: |
+            dd-${{ hashFiles('app/ios/Podfile.lock') }}-
+            dd-
+
+      - name: Build for the simulator
+        working-directory: app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -workspace ios/NewExpensify.xcworkspace \
+            -scheme "New Expensify Dev" \
+            -configuration DebugDevelopment \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "${RUNNER_TEMP}/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build | tail -40
+
+      - name: Boot a simulator and install the app
+        run: |
+          UDID=$(xcrun simctl list devices available -j \
+            | jq -r '[.devices[][] | select(.name | test("iPhone 1[5-9]"))][0].udid')
+          [ -n "$UDID" ] && [ "$UDID" != "null" ] || { echo "no iPhone simulator available"; exit 1; }
+          echo "SIM_UDID=$UDID" >> "$GITHUB_ENV"
+
+          xcrun simctl boot "$UDID"
+          # Opening Simulator.app gives the device a real window; the app renders headlessly either
+          # way, but a visible window is what lets `screencapture` prove this ran on a Mac if wanted.
+          open -a Simulator --args -CurrentDeviceUDID "$UDID"
+          xcrun simctl bootstatus "$UDID" -b
+
+          APP=$(find "${RUNNER_TEMP}/dd/Build/Products" -maxdepth 2 -name "*.app" | head -1)
+          [ -n "$APP" ] || { echo "no .app was produced"; exit 1; }
+          APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
+          echo "built $APP ($APP_ID)"
+          echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
+          xcrun simctl install "$UDID" "$APP"
+
+      # A DebugDevelopment build does not embed the JS bundle — it pulls it from Metro at runtime.
+      - name: Start Metro
+        working-directory: app
+        run: |
+          npm start > "${RUNNER_TEMP}/metro.log" 2>&1 &
+          for i in $(seq 60); do
+            curl -sf http://localhost:8081/status > /dev/null && { echo "metro up"; exit 0; }
+            sleep 5
+          done
+          echo "metro never came up:"; tail -40 "${RUNNER_TEMP}/metro.log"; exit 1
+
+      - name: Install Maestro
+        # Playwright cannot drive a native app. Maestro taps and types by visible text, which
+        # survives layout churn far better than pixel coordinates.
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Sign in
+        id: signin
+        # NOT fatal on purpose: if a selector has drifted, we still want the screenshot and the view
+        # hierarchy Maestro dumps on failure — that is what tells us the real selector, and a 40-min
+        # build is too expensive to spend on a run that tells us nothing.
+        continue-on-error: true
+        env:
+          EXPENSIFY_EMAIL: ${{ secrets.EXPENSIFY_EMAIL }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_APP_PASSWORD: ${{ secrets.IMAP_APP_PASSWORD }}
+        run: |
+          # Stamp BEFORE submitting the address: any code older than this is from a previous run.
+          REQUESTED_AT=$(date +%s)
+          maestro test -e APP_ID="${APP_ID}" -e EMAIL="${EXPENSIFY_EMAIL}" ci/flows/ios-01-email.yaml
+
+          CODE=$(python3 ci/scripts/magic_code.py --since "${REQUESTED_AT}" --timeout 180)
+          echo "got magic code from inbox"
+          # ::add-mask:: so the code cannot be read out of the public run log.
+          echo "::add-mask::${CODE}"
+          maestro test -e APP_ID="${APP_ID}" -e CODE="${CODE}" ci/flows/ios-02-code.yaml
+
+      - name: Screenshot
+        run: |
+          mkdir -p screenshots
+          # simctl captures the whole device frame, which is what the PR template's iOS row shows.
+          xcrun simctl io "${SIM_UDID}" screenshot screenshots/ios-native.png
+          echo "captured screenshots/ios-native.png"
+
+      - name: Collect Maestro debug output (on sign-in failure)
+        if: steps.signin.outcome != 'success'
+        run: |
+          echo "::warning::sign-in did not complete — the screenshot shows where it stalled"
+          mkdir -p screenshots/maestro-debug
+          # Maestro dumps the view hierarchy + its own screenshots here; the hierarchy names the
+          # selectors that actually exist on screen.
+          cp -R "$HOME/.maestro/tests/"* screenshots/maestro-debug/ 2>/dev/null || true
+
+      - name: Metro log (on failure)
+        if: failure()
+        run: tail -60 "${RUNNER_TEMP}/metro.log" || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-ios-native
+          path: screenshots/
+          if-no-files-found: warn
+          retention-days: 14
+
   # A PR body cannot embed an artifact — it needs a URL GitHub will render. Publishing to an
   # `evidence` branch yields permanent raw.githubusercontent.com links that outlive artifact
   # retention and depend on no server of ours. One job does it so the matrix cannot race on a push.
   publish:
-    needs: capture
+    needs: [capture, ios-native]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -200,7 +390,9 @@ jobs:
           DEST: evidence/${{ inputs.target_ref }}-${{ github.run_id }}
         run: |
           shopt -s nullglob
-          files=(incoming/*)
+          # Only publish finished evidence: maestro-debug is a failure dump for us to read in the
+          # artifact, not something to commit to a permanent branch.
+          files=(incoming/*.png incoming/*.mp4)
           if [ ${#files[@]} -eq 0 ]; then echo "nothing captured"; exit 0; fi
 
           git config user.name "github-actions[bot]"
@@ -208,7 +400,7 @@ jobs:
           git fetch origin evidence && git checkout evidence || git checkout --orphan evidence
           git rm -rqf . 2>/dev/null || true
           mkdir -p "${DEST}"
-          cp incoming/* "${DEST}/"
+          cp "${files[@]}" "${DEST}/"
           git add "${DEST}"
           git commit -qm "evidence: ${{ inputs.target_ref }} (run ${{ github.run_id }})"
           git push -q origin evidence
