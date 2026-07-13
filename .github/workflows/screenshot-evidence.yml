@@ -383,7 +383,11 @@ jobs:
         run: |
           mkdir -p screenshots
           xcrun simctl launch "${SIM_UDID}" "${APP_ID}" || true
-          sleep 25
+          # The pre-warm curl does not spare the app its own bundling pass (it requests the bundle
+          # with different query params, so it misses that cache entry). 25s was not enough — the
+          # last run photographed "Bundling 88%". Give it a real budget; this also leaves Metro warm
+          # for the relaunch Maestro does next, which is the launch that has to reach the login screen.
+          sleep 150
           xcrun simctl io "${SIM_UDID}" screenshot screenshots/ios-native-prelogin.png
           xcrun simctl terminate "${SIM_UDID}" "${APP_ID}" || true
 

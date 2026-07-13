@@ -5,8 +5,10 @@
 # (magic_code.py) and feeds it to ios-02-code.yaml. A single flow could not wait for that.
 appId: ${APP_ID}
 ---
-- launchApp:
-    clearState: true
+# NOT `clearState: true`. Clearing state wipes the app's stored Metro dev-server URL, so the app
+# relaunches with unsanitizedScriptURLString = (null) and dies on "No script URL provided" before it
+# can render anything. The app is freshly installed on every run anyway, so its state is already clean.
+- launchApp
 
 # The workflow pre-builds the JS bundle before this runs, so the app opens against a warm Metro.
 # The wait is still generous: a cold simulator's first paint is not instant, and the failure mode of
