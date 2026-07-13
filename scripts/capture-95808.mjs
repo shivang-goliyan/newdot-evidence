@@ -28,7 +28,9 @@ const LABEL = process.env.LABEL ?? "before";
 const TITLE_MATCH = process.env.SEED_TITLE_MATCH ?? "John";
 // The chat that CONTAINS the report preview card. The card lives in the workspace chat, not on the
 // report page itself — opening the report row navigates away from the surface we need to photograph.
-const CHAT_MATCH = process.env.CHAT_MATCH ?? "expenses";
+// "expenses" matched Concierge's own blurb ("...update expenses...") and opened the wrong chat.
+// The workspace name is unique to the row we want.
+const CHAT_MATCH = process.env.CHAT_MATCH ?? "Bug Test Workspace";
 // The Search list of expense reports — the surface that renders ExpenseReportListItemRow*.
 const SEARCH_ROUTE = "/search?q=" + encodeURIComponent("type:expense-report");
 
