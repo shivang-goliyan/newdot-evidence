@@ -26,6 +26,9 @@ const LABEL = process.env.LABEL ?? "before";
 // Matched against the row text to find the seeded report. Deliberately a fragment that survives
 // BOTH states: "R&amp;D" (buggy) and "R&D" (fixed) both contain "Bob".
 const TITLE_MATCH = process.env.SEED_TITLE_MATCH ?? "John";
+// The chat that CONTAINS the report preview card. The card lives in the workspace chat, not on the
+// report page itself — opening the report row navigates away from the surface we need to photograph.
+const CHAT_MATCH = process.env.CHAT_MATCH ?? "expenses";
 // The Search list of expense reports — the surface that renders ExpenseReportListItemRow*.
 const SEARCH_ROUTE = "/search?q=" + encodeURIComponent("type:expense-report");
 
@@ -84,20 +87,26 @@ try {
   const rendered = await row.textContent();
   console.log(`[${LABEL}] search row renders: ${JSON.stringify(rendered)}`);
 
-  // Surface 2: the report preview card in chat. Opening the row navigates to the report; the
-  // preview header renders the same name through a different path (derived report attributes).
-  await row.click();
-  await page.waitForTimeout(6_000);
-  await shoot(page, "2-report-preview");
+  // Surface 2: the report preview card, which renders the same name through a DIFFERENT path
+  // (derived report attributes -> ReportPreviewHeader). It lives in the workspace CHAT.
+  await page.goto(APP_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForSelector('[data-testid="BaseSidebarScreen"]', { timeout: 60_000 });
+  const chat = page.getByText(new RegExp(CHAT_MATCH, "i")).first();
+  await chat.waitFor({ state: "visible", timeout: 60_000 });
+  await chat.click();
+  await page.waitForTimeout(10_000);
 
   const header = page.getByTestId("MoneyRequestReportPreview-reportName").first();
   if (await header.isVisible().catch(() => false)) {
+    await header.scrollIntoViewIfNeeded().catch(() => {});
+    await page.waitForTimeout(2_000);
     console.log(
       `[${LABEL}] preview header renders: ${JSON.stringify(await header.textContent())}`,
     );
   } else {
-    console.log(`[${LABEL}] preview header not visible on this screen`);
+    console.log(`[${LABEL}] preview header NOT FOUND in the chat`);
   }
+  await shoot(page, "2-report-preview");
 } catch (error) {
   await shoot(page, "failure").catch(() => {});
   throw error;

@@ -24,11 +24,18 @@ const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
 // < > -> &lt; &gt;, © -> &copy; and ' -> &#39;. An earlier attempt used `Bob's R&D "Q3"` and came
 // back completely unencoded — so a bare ampersand is NOT what triggers this, and guessing at the
 // characters cost a run. These are the ones the report itself proves get encoded.
-// NewDot's title field REJECTS < and > with "Invalid character" (client-side validation), so the
-// `Risk Assessment &lt;Internal&gt;` report in the issue's screenshot cannot have been typed into
-// NewDot at all — it came from another write path. £ and © are accepted, and the same screenshot
-// proves both get stored encoded (&#163;, &copy;).
-const NEW_TITLE = process.env.NEW_TITLE ?? `John's £100 © R&D`;
+// PROVEN TWICE: renaming a report from NewDot does NOT store the name encoded. `Bob's R&D "Q3"`
+// and `John's £100 © R&D` both came back byte-for-byte unencoded from the server (verified on main,
+// which has no decode, in a fresh browser with empty Onyx). So the entities in the issue's
+// screenshot are NOT produced by NewDot's rename — they arrive from another write path (OldDot /
+// the API / the share extension jmgraa was debugging). NewDot even REJECTS < and > outright
+// ("Invalid character"), so `Risk Assessment &lt;Internal&gt;` cannot have been typed here at all.
+//
+// The bug is a RENDER bug: the components fail to decode an already-encoded value. To put exactly
+// that value in Onyx from a NewDot-only account, type the ENCODED form — NewDot stores it verbatim,
+// so the resulting Onyx state is byte-identical to what the backend delivers for `John's £100 © R&D`.
+// Same state, same render path, same bug; only the door we came in through differs.
+const NEW_TITLE = process.env.NEW_TITLE ?? `John&#39;s &#163;100 &copy; R&amp;D`;
 const SEARCH_ROUTE = "/search?q=" + encodeURIComponent("type:expense-report");
 
 if (!EMAIL) {
