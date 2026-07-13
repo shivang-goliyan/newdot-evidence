@@ -375,16 +375,35 @@ jobs:
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
+      # Proof of what the app actually looks like before any automation touches it. Without this, a
+      # sign-in failure is ambiguous — a wrong selector and an app still stuck on a loading screen
+      # look identical from the logs. (That ambiguity cost a whole run: the "selector" failure turned
+      # out to be "Bundling 67%...".)
+      - name: Screenshot the launched app (pre-sign-in)
+        run: |
+          mkdir -p screenshots
+          xcrun simctl launch "${SIM_UDID}" "${APP_ID}" || true
+          sleep 25
+          xcrun simctl io "${SIM_UDID}" screenshot screenshots/ios-native-prelogin.png
+          xcrun simctl terminate "${SIM_UDID}" "${APP_ID}" || true
+
       - name: Sign in
         id: signin
         # NOT fatal on purpose: if a selector has drifted, we still want the screenshot and the view
         # hierarchy Maestro dumps on failure — that is what tells us the real selector, and a 40-min
         # build is too expensive to spend on a run that tells us nothing.
         continue-on-error: true
+        # The flows have their own per-command timeouts, but those do not bound Maestro's iOS DRIVER,
+        # which can hang bringing up its XCUITest runner. Without a ceiling here that hang eats the
+        # entire 120-minute job and produces no screenshot at all — which is exactly what happened.
+        timeout-minutes: 20
         env:
           EXPENSIFY_EMAIL: ${{ secrets.EXPENSIFY_EMAIL }}
           IMAP_USER: ${{ secrets.IMAP_USER }}
           IMAP_APP_PASSWORD: ${{ secrets.IMAP_APP_PASSWORD }}
+          MAESTRO_CLI_NO_ANALYTICS: "1"
+          # The driver handshake is the part that hangs; bound it explicitly rather than forever.
+          MAESTRO_DRIVER_STARTUP_TIMEOUT: "120000"
         run: |
           # Stamp BEFORE submitting the address: any code older than this is from a previous run.
           REQUESTED_AT=$(date +%s)
