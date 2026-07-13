@@ -411,13 +411,17 @@ jobs:
         run: |
           # Stamp BEFORE submitting the address: any code older than this is from a previous run.
           REQUESTED_AT=$(date +%s)
-          maestro test -e APP_ID="${APP_ID}" -e EMAIL="${EXPENSIFY_EMAIL}" ci/flows/ios-01-email.yaml
+          # --device is REQUIRED, not a nicety: with several simulators available Maestro will not
+          # pick one, and its iOS driver hangs bringing up the XCUITest runner instead of failing.
+          # That hang produces no logs and no view hierarchy, which is exactly what we saw — while
+          # the pre-sign-in screenshot proved the app was sitting happily on the login screen.
+          maestro --device "${SIM_UDID}" test -e APP_ID="${APP_ID}" -e EMAIL="${EXPENSIFY_EMAIL}" ci/flows/ios-01-email.yaml
 
           CODE=$(python3 ci/scripts/magic_code.py --since "${REQUESTED_AT}" --timeout 180)
           echo "got magic code from inbox"
           # ::add-mask:: so the code cannot be read out of the public run log.
           echo "::add-mask::${CODE}"
-          maestro test -e APP_ID="${APP_ID}" -e CODE="${CODE}" ci/flows/ios-02-code.yaml
+          maestro --device "${SIM_UDID}" test -e APP_ID="${APP_ID}" -e CODE="${CODE}" ci/flows/ios-02-code.yaml
 
       - name: Screenshot
         run: |
