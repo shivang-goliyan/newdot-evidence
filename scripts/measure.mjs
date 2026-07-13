@@ -47,6 +47,37 @@ const resolve = (page, sel) => {
   return page.locator(sel);
 };
 
+/**
+ * Everything on this page that can actually be addressed.
+ *
+ * A run takes ~15 minutes (npm ci + dev server + sign-in). Coming back with "your selector matched
+ * nothing" and no further information would burn all of that and teach us nothing — and the caller
+ * CANNOT know the right selector in advance, because plenty of components carry no testID at all
+ * (ReceiptCell is one). So every run also dumps the addressable surface of the page: the model that
+ * wrote a failing selector gets handed the real list and its next attempt is a lookup, not a guess.
+ *
+ * Costs a few hundred ms. Always worth it.
+ */
+const discover = (page) =>
+  page.evaluate(() => {
+    const ids = [...new Set([...document.querySelectorAll("[data-testid]")].map((e) => e.getAttribute("data-testid")))];
+    // For each testid, a compact sketch of its subtree, so a caller can build a CSS path down to a
+    // child that has no testid of its own (the common case for leaf cells).
+    const outline = ids.slice(0, 120).map((id) => {
+      const el = document.querySelector(`[data-testid="${id}"]`);
+      const r = el?.getBoundingClientRect();
+      const kids = [...(el?.children ?? [])]
+        .slice(0, 6)
+        .map((c, i) => `${c.tagName.toLowerCase()}:nth-child(${i + 1})${c.getAttribute("data-testid") ? `[testid=${c.getAttribute("data-testid")}]` : ""}`);
+      return {
+        testid: id,
+        rect: r && { left: Math.round(r.x), top: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+        children: kids,
+      };
+    });
+    return { count: ids.length, outline };
+  });
+
 function fetchMagicCode(since) {
   const script = path.join(import.meta.dirname, "magic_code.py");
   return execFileSync("python3", [script, "--since", String(since), "--timeout", "180"], {
@@ -76,39 +107,72 @@ try {
 
   // Measure at EVERY requested viewport. A fix that turns on a threshold usually only flips at some
   // widths, so a single-width measurement can miss the case that actually matters.
+  let discovery = null;
+  let missed = 0;
   for (const [width, height] of VIEWPORTS) {
     await page.setViewportSize({ width, height });
     await page.goto(`${APP_URL}${ROUTE}`, { waitUntil: "domcontentloaded", timeout: 120_000 });
     await page.waitForTimeout(SETTLE_MS);
+    discovery ??= await discover(page);
 
     for (const { name, selector } of SELECTORS) {
-      const loc = resolve(page, selector).first();
-      const entry = { viewport: `${width}x${height}`, name, selector };
-      if (!(await loc.isVisible().catch(() => false))) {
-        // NOT an error. "This element does not render on this surface" is frequently the whole
-        // finding — an early return or a layout guard can make a surface unreachable, and proving
-        // that is as valuable as a number.
+      // A selector may be given as a fallback chain — the first one that resolves wins. Cheap
+      // insurance: the caller often cannot know whether a component carries a testID.
+      const chain = Array.isArray(selector) ? selector : [selector];
+      const entry = { viewport: `${width}x${height}`, name };
+      let box = null;
+      for (const sel of chain) {
+        const loc = resolve(page, sel).first();
+        if (await loc.isVisible().catch(() => false)) {
+          box = await loc.boundingBox();
+          entry.selector = sel;
+          break;
+        }
+      }
+      if (!box) {
+        // NOT necessarily an error. "This element does not render on this surface" is frequently
+        // the whole finding — an early return or a layout guard making a surface unreachable is as
+        // valuable as a number. But it can ALSO just be a bad selector, and we cannot tell the two
+        // apart from here. So we say so honestly and let the discovery dump settle it.
         entry.rendered = false;
+        entry.tried = chain;
+        missed++;
         results.push(entry);
-        console.log(`[${width}x${height}] ${name}: NOT RENDERED`);
+        console.log(`[${width}x${height}] ${name}: NOT RENDERED (tried ${chain.join(" | ")})`);
         continue;
       }
-      const box = await loc.boundingBox();
       Object.assign(entry, {
         rendered: true,
-        left: box && Math.round(box.x),
-        top: box && Math.round(box.y),
-        width: box && Math.round(box.width),
-        height: box && Math.round(box.height),
+        left: Math.round(box.x),
+        top: Math.round(box.y),
+        width: Math.round(box.width),
+        height: Math.round(box.height),
       });
       results.push(entry);
       console.log(`[${width}x${height}] ${name}: left=${entry.left} top=${entry.top} w=${entry.width} h=${entry.height}`);
     }
-    await page.screenshot({ path: path.join(OUT_DIR, `measure-${width}x${height}.png`) });
+    await page.screenshot({ path: path.join(OUT_DIR, `measure-${width}x${height}.png`), fullPage: false });
   }
 
-  writeFileSync(path.join(OUT_DIR, "measurements.json"), JSON.stringify({ route: ROUTE, results }, null, 2));
-  console.log(`\nwrote ${results.length} measurements`);
+  writeFileSync(
+    path.join(OUT_DIR, "measurements.json"),
+    JSON.stringify({ route: ROUTE, results, discovery }, null, 2),
+  );
+
+  // Print the addressable surface whenever anything failed to resolve. This is what makes a failed
+  // run cheap: the next attempt is a lookup in this list rather than another guess.
+  if (missed) {
+    console.log(`\n${missed} selector(s) did not resolve. Addressable elements on this route:`);
+    for (const o of discovery?.outline ?? []) {
+      const r = o.rect ? `left=${o.rect.left} top=${o.rect.top} ${o.rect.w}x${o.rect.h}` : "(no box)";
+      console.log(`  testid=${o.testid}  ${r}`);
+      if (o.children?.length) console.log(`      children: ${o.children.join(", ")}`);
+    }
+    if (!discovery?.count) {
+      console.log("  (none — the route rendered no testids at all: wrong route, or the account has no data here)");
+    }
+  }
+  console.log(`\nwrote ${results.length} measurements (${discovery?.count ?? 0} testids on the page)`);
 } catch (error) {
   await page.screenshot({ path: path.join(OUT_DIR, "measure-failure.png") }).catch(() => {});
   throw error;
