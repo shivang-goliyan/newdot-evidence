@@ -72,9 +72,6 @@ const engine = BROWSER === "webkit" ? webkit : chromium;
 // Headed when we intend to photograph the screen — a headless browser draws no window to photograph.
 const browser = await engine.launch({
   headless: !DESKTOP,
-  // Chrome's Cast/mDNS discovery makes macOS raise a "find devices on local networks?" system
-  // dialog, which lands on top of the app in the desktop screenshot. Turn the discovery off
-  // rather than try to dismiss a dialog we do not have Accessibility rights to click.
   ...(BROWSER === "chromium"
     ? {
         args: [
@@ -160,6 +157,10 @@ try {
     // we already have — so a failure here is logged, not thrown.
     const shot = path.join(OUT_DIR, `${LABEL}-desktop.png`);
     try {
+      // macOS raises a "hosted-compute- wants to find devices on local networks" alert — it is
+      // the GITHUB RUNNER AGENT that trips it, not the browser, so no Chrome flag suppresses it.
+      // It is drawn by UserNotificationCenter, which respawns harmlessly when killed.
+      execFileSync("bash", ["-c", "killall UserNotificationCenter 2>/dev/null; sleep 1"]);
       execFileSync("screencapture", ["-x", shot]);
       console.log(`captured ${shot} (full macOS screen)`);
     } catch (e) {
