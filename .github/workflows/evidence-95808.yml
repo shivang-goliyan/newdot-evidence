@@ -1,0 +1,111 @@
+# Before/after evidence for Expensify/App#95808 (report lists do not decode HTML entities).
+#
+# Separate from screenshot-evidence.yml on purpose: that one is the general PR-evidence pipeline and
+# should stay general. This one is throwaway, issue-specific, and needs to run the SAME script twice
+# against two different refs (main = before, fix branch = after) on ONE account whose data must not
+# change in between.
+#
+#   gh workflow run evidence-95808.yml --repo shivang-goliyan/newdot-evidence \
+#     -f script=probe-95808.mjs -f target_ref=main -f source_repo=Expensify/App
+name: Evidence 95808
+
+on:
+  workflow_dispatch:
+    inputs:
+      script:
+        description: "Which script to run: probe-95808.mjs | seed-95808.mjs | capture-95808.mjs"
+        required: true
+        default: "probe-95808.mjs"
+        type: string
+      source_repo:
+        description: "Repo to check out"
+        required: false
+        default: "shivang-goliyan/App"
+        type: string
+      target_ref:
+        description: "Branch or SHA to run against"
+        required: true
+        type: string
+      label:
+        description: "Names the output files (e.g. before, after)"
+        required: false
+        default: "before"
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout CI scripts (this branch)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout the app
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.target_ref }}
+          path: app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Set up the dev host + certificate
+        working-directory: app
+        run: |
+          echo "127.0.0.1 dev.new.expensify.com" | sudo tee -a /etc/hosts
+          sudo apt-get update && sudo apt-get install -y libnss3-tools
+          curl -sJLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert-v*-linux-amd64
+          sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+          npm run setup-https
+
+      - name: Start the dev server
+        working-directory: app
+        run: |
+          npm run web > "${RUNNER_TEMP}/web.log" 2>&1 &
+          for i in $(seq 90); do
+            if curl -ksf https://dev.new.expensify.com:8082 > /dev/null; then
+              echo "dev server up after ${i}0s"; exit 0
+            fi
+            sleep 10
+          done
+          echo "dev server never came up:"; tail -50 "${RUNNER_TEMP}/web.log"; exit 1
+
+      - name: Install Playwright
+        working-directory: ci/scripts
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Run ${{ inputs.script }}
+        working-directory: ci/scripts
+        env:
+          EXPENSIFY_EMAIL: ${{ secrets.EXPENSIFY_EMAIL }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_APP_PASSWORD: ${{ secrets.IMAP_APP_PASSWORD }}
+          LABEL: ${{ inputs.label }}
+          OUT_DIR: ${{ github.workspace }}/screenshots
+        run: node ${{ inputs.script }}
+
+      - name: Dev server log (on failure)
+        if: failure()
+        run: tail -100 "${RUNNER_TEMP}/web.log" || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-95808-${{ inputs.label }}
+          path: screenshots/
+          if-no-files-found: warn
+          retention-days: 14
