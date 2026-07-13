@@ -348,15 +348,25 @@ jobs:
           xcrun simctl install "${SIM_UDID}" "$APP"
 
       # A DebugDevelopment build does not embed the JS bundle — it pulls it from Metro at runtime.
-      - name: Start Metro
+      - name: Start Metro and pre-build the bundle
         working-directory: app
         run: |
           npm start > "${RUNNER_TEMP}/metro.log" 2>&1 &
           for i in $(seq 60); do
-            curl -sf http://localhost:8081/status > /dev/null && { echo "metro up"; exit 0; }
+            curl -sf http://localhost:8081/status > /dev/null && { echo "metro up"; break; }
             sleep 5
           done
-          echo "metro never came up:"; tail -40 "${RUNNER_TEMP}/metro.log"; exit 1
+          curl -sf http://localhost:8081/status > /dev/null || {
+            echo "metro never came up:"; tail -40 "${RUNNER_TEMP}/metro.log"; exit 1; }
+
+          # Build the bundle HERE rather than letting the app trigger it on launch. A cold bundle of
+          # an app this size takes minutes ("Bundling 67%..." was still on screen when the previous
+          # run's sign-in timed out), and that is dead time Maestro would have to sit through with a
+          # wait long enough to be indistinguishable from a hang. Requesting it up front means the
+          # app opens against a warm bundler and renders immediately.
+          echo "pre-building the JS bundle (cold; expect several minutes)"
+          time curl -sS --max-time 1800 -o /dev/null -w 'bundle: HTTP %{http_code} in %{time_total}s\n' \
+            'http://localhost:8081/index.bundle?platform=ios&dev=true&minify=false'
 
       - name: Install Maestro
         # Playwright cannot drive a native app. Maestro taps and types by visible text, which

@@ -8,10 +8,12 @@ appId: ${APP_ID}
 - launchApp:
     clearState: true
 
-# The splash screen sits over the app for a while on a cold simulator boot.
+# The workflow pre-builds the JS bundle before this runs, so the app opens against a warm Metro.
+# The wait is still generous: a cold simulator's first paint is not instant, and the failure mode of
+# waiting too long is a slow run, whereas waiting too little throws away a 40-minute build.
 - extendedWaitUntil:
     visible: "Phone or email"
-    timeout: 120000
+    timeout: 240000
 
 - tapOn: "Phone or email"
 - inputText: ${EMAIL}
