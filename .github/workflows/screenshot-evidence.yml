@@ -58,9 +58,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The PR template's "MacOS: Chrome / Safari" row wants BOTH engines on a Mac. A viewport
-          # screenshot is identical on any OS (it has no window chrome), so the mac jobs also grab
-          # the whole screen — menu bar and traffic lights are what actually evidence "on a Mac".
+          # The PR template has ONE "MacOS: Chrome / Safari" row and one <details> block — either
+          # browser satisfies it, so we run Chrome and skip a second macOS runner. A viewport
+          # screenshot is identical on any OS (it has no window chrome), so the mac job also grabs
+          # the whole screen: the menu bar and traffic lights are what evidence "on a Mac".
+          # (BROWSER=webkit still works if a Safari-specific bug ever needs it.)
           - {
               os: ubuntu-latest,
               label: web-chrome,
@@ -71,12 +73,6 @@ jobs:
               os: macos-latest,
               label: macos-chrome,
               browser: chromium,
-              desktop: "true",
-            }
-          - {
-              os: macos-latest,
-              label: macos-safari,
-              browser: webkit,
               desktop: "true",
             }
     name: ${{ matrix.label }}
