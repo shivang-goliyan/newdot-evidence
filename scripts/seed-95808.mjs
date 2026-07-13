@@ -81,10 +81,13 @@ try {
   await page.goto(`${APP_URL}${SEARCH_ROUTE}`, {
     waitUntil: "domcontentloaded",
   });
-  const row = page.getByText(/Expense Report/i).first();
-  await row.waitFor({ state: "visible", timeout: 90_000 });
-  await row.click();
-  await page.waitForTimeout(8_000);
+  // Clicking the title TEXT does not navigate — the row exposes an explicit "View" button, which is
+  // what actually opens the report.
+  const view = page.getByRole("button", { name: /^View$/ }).first();
+  await view.waitFor({ state: "visible", timeout: 90_000 });
+  await view.click();
+  await page.waitForURL(/\/r\/\d+/, { timeout: 60_000 });
+  await page.waitForTimeout(6_000);
   await shoot(page, "1-report");
 
   // The report ID is in the URL — /r/<id>. Everything after this is driven off it, so a changed
