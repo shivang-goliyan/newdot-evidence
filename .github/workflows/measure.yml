@@ -45,6 +45,11 @@ on:
         required: false
         default: "4000"
         type: string
+      label:
+        description: 'Names the outputs, e.g. "before" / "after"'
+        required: false
+        default: "measure"
+        type: string
 
 # Every run signs into the SAME account and polls the SAME inbox for a magic code. Two runs in
 # flight race: whichever polls first eats the code the other is waiting for, and the loser dies with
@@ -120,6 +125,7 @@ jobs:
           SELECTORS: ${{ inputs.selectors }}
           VIEWPORTS: ${{ inputs.viewports }}
           SETTLE_MS: ${{ inputs.settle_ms }}
+          LABEL: ${{ inputs.label }}
           OUT_DIR: ${{ github.workspace }}/out
         run: node measure.mjs
 
@@ -131,5 +137,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: measurements-${{ inputs.target_ref }}
+          name: measurements-${{ inputs.label }}
           path: out/

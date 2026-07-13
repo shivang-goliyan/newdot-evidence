@@ -21,6 +21,7 @@
  *   SELECTORS        JSON array of {name, selector} — CSS or testid=<id> or text=<...>
  *   VIEWPORTS        JSON array of [w,h] pairs (default [[1600,982]])
  *   SETTLE_MS        ms to wait after navigation before measuring (default 4000)
+ *   LABEL            names hover screenshots, e.g. "before" / "after" (default "measure")
  *   OUT_DIR          where measurements.json + screenshots land (default screenshots)
  */
 import { execFileSync } from "node:child_process";
@@ -33,6 +34,8 @@ const EMAIL = process.env.EXPENSIFY_EMAIL;
 const ROUTE = process.env.ROUTE ?? "/";
 const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
 const SETTLE_MS = Number(process.env.SETTLE_MS ?? 4000);
+// Names the hover screenshots, so a before/after pair from two refs does not overwrite itself.
+const LABEL = process.env.LABEL ?? "measure";
 const SELECTORS = JSON.parse(process.env.SELECTORS ?? "[]");
 const VIEWPORTS = JSON.parse(process.env.VIEWPORTS ?? "[[1600,982]]");
 
@@ -115,11 +118,28 @@ try {
     await page.waitForTimeout(SETTLE_MS);
     discovery ??= await discover(page);
 
-    for (const { name, selector } of SELECTORS) {
+    for (const { name, selector, hover, hoverWaitMs } of SELECTORS) {
+      // Some elements only EXIST while something else is hovered — a tooltip, a popover, or (the
+      // case this was built for) a receipt hover-preview. Measuring the thing the bug is actually
+      // about therefore requires driving the pointer first, so a selector may name an element to
+      // hover before it is looked for.
+      if (hover) {
+        const h = resolve(page, hover).first();
+        if (await h.isVisible().catch(() => false)) {
+          await h.hover();
+          // The preview debounces (CONST.TIMING.SHOW_HOVER_PREVIEW_DELAY) and then fades in, and it
+          // re-positions once its own height is measured. Measuring before that settles reads the
+          // first-frame fallback position, not the final one.
+          await page.waitForTimeout(hoverWaitMs ?? 2500);
+        } else {
+          console.log(`[${width}x${height}] ${name}: hover target "${hover}" not found`);
+        }
+      }
+
       // A selector may be given as a fallback chain — the first one that resolves wins. Cheap
       // insurance: the caller often cannot know whether a component carries a testID.
       const chain = Array.isArray(selector) ? selector : [selector];
-      const entry = { viewport: `${width}x${height}`, name };
+      const entry = { viewport: `${width}x${height}`, name, hovered: hover ?? null };
       let box = null;
       for (const sel of chain) {
         const loc = resolve(page, sel).first();
@@ -150,6 +170,12 @@ try {
       });
       results.push(entry);
       console.log(`[${width}x${height}] ${name}: left=${entry.left} top=${entry.top} w=${entry.width} h=${entry.height}`);
+      // Photograph a hover-only element WHILE it is still up — the pointer moves on the next
+      // iteration and it vanishes. A number proves the position; the picture proves the number is
+      // describing the thing everyone is arguing about.
+      if (hover) {
+        await page.screenshot({ path: path.join(OUT_DIR, `${LABEL}-${name}-${width}x${height}.png`) });
+      }
     }
     await page.screenshot({ path: path.join(OUT_DIR, `measure-${width}x${height}.png`), fullPage: false });
   }
