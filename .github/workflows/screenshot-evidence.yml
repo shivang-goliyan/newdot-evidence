@@ -24,24 +24,29 @@ on:
   workflow_dispatch:
     inputs:
       source_repo:
-        description: 'Repo holding the fix branch (must be public)'
+        description: "Repo holding the fix branch (must be public)"
         required: false
-        default: 'shivang-goliyan/App'
+        default: "shivang-goliyan/App"
         type: string
       target_ref:
-        description: 'Branch or SHA of the fix to screenshot'
+        description: "Branch or SHA of the fix to screenshot"
         required: true
         type: string
       route:
-        description: 'Route to open after sign-in (e.g. /search)'
+        description: "Route to open after sign-in (e.g. /search)"
         required: false
-        default: '/'
+        default: "/"
         type: string
       viewport:
-        description: 'Viewport WxH'
+        description: "Viewport WxH"
         required: false
-        default: '1512x982'
+        default: "1512x982"
         type: string
+      record:
+        description: "Also record an mp4 of the session"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   web:
@@ -109,6 +114,7 @@ jobs:
           IMAP_APP_PASSWORD: ${{ secrets.IMAP_APP_PASSWORD }}
           ROUTE: ${{ inputs.route }}
           VIEWPORT: ${{ inputs.viewport }}
+          RECORD: ${{ inputs.record }}
           OUT_DIR: ${{ github.workspace }}/screenshots
         run: node capture.mjs
 
@@ -123,6 +129,6 @@ jobs:
           name: screenshots-${{ inputs.target_ref }}
           path: screenshots/
           if-no-files-found: warn
-          # Artifacts on a public repo are world-downloadable. Keep the window short —
-          # download them, put them in the PR, and they expire on their own.
-          retention-days: 1
+          # Artifacts on a public repo are world-downloadable, but the capture account is a
+          # throwaway with no real data, so a working window beats a paranoid one.
+          retention-days: 14

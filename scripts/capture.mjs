@@ -6,10 +6,11 @@
  * works against a local backend. We stamp the time BEFORE requesting the code so
  * a stale email can't satisfy the poll.
  *
- * Env: APP_URL, EXPENSIFY_EMAIL, ROUTE (post-login path), VIEWPORT ("1512x982"), OUT_DIR.
+ * Env: APP_URL, EXPENSIFY_EMAIL, ROUTE (post-login path), VIEWPORT ("1512x982"), OUT_DIR,
+ *      RECORD ("true" to also produce an mp4 of the session).
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { chromium } from "playwright";
 
@@ -17,6 +18,7 @@ const APP_URL = process.env.APP_URL ?? "https://dev.new.expensify.com:8082";
 const EMAIL = process.env.EXPENSIFY_EMAIL;
 const ROUTE = process.env.ROUTE ?? "/";
 const OUT_DIR = process.env.OUT_DIR ?? "screenshots";
+const RECORD = process.env.RECORD === "true";
 const [width, height] = (process.env.VIEWPORT ?? "1512x982")
   .split("x")
   .map(Number);
@@ -64,6 +66,16 @@ const browser = await chromium.launch();
 const context = await browser.newContext({
   viewport: { width, height },
   ignoreHTTPSErrors: true,
+  // Playwright only finalises the .webm when the context closes, so the file is
+  // collected in the `finally` block, not here.
+  ...(RECORD
+    ? {
+        recordVideo: {
+          dir: path.join(OUT_DIR, "raw-video"),
+          size: { width, height },
+        },
+      }
+    : {}),
 });
 const page = await context.newPage();
 
@@ -112,5 +124,38 @@ try {
   await shoot(page, "failure").catch(() => {});
   throw error;
 } finally {
+  const video = RECORD ? page.video() : null;
+  // Closing the context is what flushes the .webm to disk — ask for its path only after.
+  await context.close();
+  if (video) {
+    const webm = await video.path();
+    const mp4 = path.join(OUT_DIR, "web-chrome.mp4");
+    try {
+      // GitHub's PR composer plays mp4 inline; it will not render a .webm.
+      execFileSync(
+        "ffmpeg",
+        [
+          "-y",
+          "-i",
+          webm,
+          "-movflags",
+          "faststart",
+          "-pix_fmt",
+          "yuv420p",
+          mp4,
+        ],
+        {
+          stdio: "ignore",
+        },
+      );
+      console.log(`recorded ${mp4}`);
+      rmSync(path.join(OUT_DIR, "raw-video"), { recursive: true, force: true });
+    } catch {
+      // No ffmpeg (or a bad encode) should never lose the evidence — keep the raw webm.
+      renameSync(webm, path.join(OUT_DIR, "web-chrome.webm"));
+      console.log("ffmpeg unavailable — kept the raw .webm");
+      rmSync(path.join(OUT_DIR, "raw-video"), { recursive: true, force: true });
+    }
+  }
   await browser.close();
 }
