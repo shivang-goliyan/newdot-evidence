@@ -32,6 +32,15 @@ on:
         default: "before"
         type: string
 
+# Every run here signs into the SAME Expensify account and polls the SAME inbox for a magic code.
+# Two runs in flight at once therefore race: whichever polls first consumes the code the other is
+# waiting for, and the loser dies with "no magic code within 180s" — which looks like a broken
+# script but is really a collision. Serialising is not an optimisation, it is a correctness fix.
+# cancel-in-progress is false on purpose: a queued run must wait, never kill the one signing in.
+concurrency:
+  group: expensify-signin
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest

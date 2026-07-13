@@ -58,6 +58,15 @@ permissions:
   # Needed by the publish job: a PR body cannot embed a build artifact, only a URL.
   contents: write
 
+# Every run here signs into the SAME Expensify account and polls the SAME inbox for a magic code.
+# Two runs in flight at once therefore race: whichever polls first consumes the code the other is
+# waiting for, and the loser dies with "no magic code within 180s" — which looks like a broken
+# script but is really a collision. Serialising is not an optimisation, it is a correctness fix.
+# cancel-in-progress is false on purpose: a queued run must wait, never kill the one signing in.
+concurrency:
+  group: expensify-signin
+  cancel-in-progress: false
+
 jobs:
   # A matrix leg cannot be skipped with `if`, so the browser legs are computed here instead: asking
   # for ios-native alone must not drag a browser run along with it (and vice versa), or every
