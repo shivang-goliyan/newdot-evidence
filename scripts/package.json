@@ -1,0 +1,9 @@
+{
+    "name": "screenshot-evidence",
+    "private": true,
+    "type": "module",
+    "description": "Fork-only PR screenshot capture. Not part of the App build.",
+    "dependencies": {
+        "playwright": "^1.49.0"
+    }
+}

@@ -1,0 +1,128 @@
+# Captures PR screenshot evidence so a fix can be evidenced without a Mac and without running the
+# app on a memory-constrained laptop.
+#
+# This belongs in a STANDALONE public repo — NOT in the Expensify/App fork. It only needs to
+# *check out* the fix branch, so it leaves no trace on the fork: no branch, no workflow file,
+# nothing that can leak into a PR diff. The repo must be public: standard runners (macOS included)
+# are free and unlimited on public repos, and metered 10x on private ones.
+#
+#   gh workflow run screenshot-evidence.yml --repo <you>/newdot-evidence \
+#      -f source_repo=shivang-goliyan/App -f target_ref=<fix-branch> -f route=/search
+#
+# Secrets required on the fork (Settings → Secrets → Actions):
+#   EXPENSIFY_EMAIL     the account to sign in as
+#   IMAP_USER           mailbox that receives its magic codes (e.g. you@gmail.com)
+#   IMAP_APP_PASSWORD   Gmail App Password (a normal password will NOT work)
+#
+# Use a DEDICATED test Expensify account, not your personal one. The dev server proxies to the
+# PRODUCTION API, so this signs into a real account and any action it takes is real. And on a
+# public fork, run logs and uploaded artifacts are world-readable — never capture anything you
+# would not paste into the PR itself.
+name: Screenshot evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: 'Repo holding the fix branch (must be public)'
+        required: false
+        default: 'shivang-goliyan/App'
+        type: string
+      target_ref:
+        description: 'Branch or SHA of the fix to screenshot'
+        required: true
+        type: string
+      route:
+        description: 'Route to open after sign-in (e.g. /search)'
+        required: false
+        default: '/'
+        type: string
+      viewport:
+        description: 'Viewport WxH'
+        required: false
+        default: '1512x982'
+        type: string
+
+jobs:
+  web:
+    # Standard runners are free and unlimited on public repos — a failed run costs nothing.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout CI scripts (this branch)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout the fix
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.target_ref }}
+          path: app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      # The dev server binds to dev.new.expensify.com over HTTPS with an mkcert-issued
+      # certificate, so the runner needs both the hosts entry and the cert.
+      - name: Set up the dev host + certificate
+        working-directory: app
+        run: |
+          echo "127.0.0.1 dev.new.expensify.com" | sudo tee -a /etc/hosts
+          sudo apt-get update && sudo apt-get install -y libnss3-tools
+          curl -sJLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert-v*-linux-amd64
+          sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+          npm run setup-https
+
+      - name: Start the dev server
+        working-directory: app
+        run: |
+          npm run web > "${RUNNER_TEMP}/web.log" 2>&1 &
+          for i in $(seq 90); do
+            if curl -ksf https://dev.new.expensify.com:8082 > /dev/null; then
+              echo "dev server up after ${i}0s"; exit 0
+            fi
+            sleep 10
+          done
+          echo "dev server never came up:"; tail -50 "${RUNNER_TEMP}/web.log"; exit 1
+
+      - name: Install Playwright
+        working-directory: ci/scripts
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Capture
+        working-directory: ci/scripts
+        env:
+          EXPENSIFY_EMAIL: ${{ secrets.EXPENSIFY_EMAIL }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_APP_PASSWORD: ${{ secrets.IMAP_APP_PASSWORD }}
+          ROUTE: ${{ inputs.route }}
+          VIEWPORT: ${{ inputs.viewport }}
+          OUT_DIR: ${{ github.workspace }}/screenshots
+        run: node capture.mjs
+
+      - name: Dev server log (on failure)
+        if: failure()
+        run: tail -100 "${RUNNER_TEMP}/web.log" || true
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ inputs.target_ref }}
+          path: screenshots/
+          if-no-files-found: warn
+          # Artifacts on a public repo are world-downloadable. Keep the window short —
+          # download them, put them in the PR, and they expire on their own.
+          retention-days: 1
