@@ -268,21 +268,11 @@ jobs:
             dd-${{ hashFiles('app/ios/Podfile.lock') }}-
             dd-
 
-      - name: Build for the simulator
-        working-directory: app
-        run: |
-          set -o pipefail
-          xcodebuild \
-            -workspace ios/NewExpensify.xcworkspace \
-            -scheme "New Expensify Dev" \
-            -configuration DebugDevelopment \
-            -sdk iphonesimulator \
-            -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath "${RUNNER_TEMP}/dd" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
-            build | tail -40
-
-      - name: Boot a simulator and install the app
+      # Booting BEFORE the build so the build can target this exact device. A
+      # 'generic/platform=iOS Simulator' destination compiles every simulator arch — including the
+      # x86_64 slice, which is dead weight on an Apple Silicon runner and a common way for a pod to
+      # fail to build. Targeting the booted device + ONLY_ACTIVE_ARCH builds arm64 alone.
+      - name: Boot a simulator
         run: |
           UDID=$(xcrun simctl list devices available -j \
             | jq -r '[.devices[][] | select(.name | test("iPhone 1[5-9]"))][0].udid')
@@ -295,12 +285,49 @@ jobs:
           open -a Simulator --args -CurrentDeviceUDID "$UDID"
           xcrun simctl bootstatus "$UDID" -b
 
+      - name: Build for the simulator
+        working-directory: app
+        run: |
+          # Full log to a file, never to a pipe: `| tail` silently discards the `error:` lines and
+          # leaves only trailing warnings, which is worse than no log at all.
+          set +e
+          xcodebuild \
+            -workspace ios/NewExpensify.xcworkspace \
+            -scheme "New Expensify Dev" \
+            -configuration DebugDevelopment \
+            -sdk iphonesimulator \
+            -destination "id=${SIM_UDID}" \
+            -derivedDataPath "${RUNNER_TEMP}/dd" \
+            ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build > "${RUNNER_TEMP}/xcodebuild.log" 2>&1
+          STATUS=$?
+          set -e
+          if [ $STATUS -ne 0 ]; then
+            echo "===== errors ====="
+            grep -nE "error:|error " "${RUNNER_TEMP}/xcodebuild.log" | head -40
+            echo "===== last 60 lines ====="
+            tail -60 "${RUNNER_TEMP}/xcodebuild.log"
+            exit $STATUS
+          fi
+          echo "build ok"
+
+      - name: Upload the build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: ${{ runner.temp }}/xcodebuild.log
+          if-no-files-found: warn
+
+      - name: Install the app
+        run: |
           APP=$(find "${RUNNER_TEMP}/dd/Build/Products" -maxdepth 2 -name "*.app" | head -1)
           [ -n "$APP" ] || { echo "no .app was produced"; exit 1; }
           APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")
           echo "built $APP ($APP_ID)"
           echo "APP_ID=$APP_ID" >> "$GITHUB_ENV"
-          xcrun simctl install "$UDID" "$APP"
+          xcrun simctl install "${SIM_UDID}" "$APP"
 
       # A DebugDevelopment build does not embed the JS bundle — it pulls it from Metro at runtime.
       - name: Start Metro
