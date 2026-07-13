@@ -107,10 +107,8 @@ try {
   console.log("=== DETAILS PAGE ===");
   console.log(JSON.stringify(await visibleNames(page), null, 1));
 
-  const titleField = page
-    .getByRole("menuitem")
-    .filter({ hasText: /report name|title|name/i })
-    .first();
+  // The row is labelled "Title, <current name>" — an aria-label, not a menuitem role.
+  const titleField = page.locator('[aria-label^="Title,"]').first();
   await titleField.waitFor({ state: "visible", timeout: 30_000 });
   await titleField.click();
   await page.waitForTimeout(4_000);
