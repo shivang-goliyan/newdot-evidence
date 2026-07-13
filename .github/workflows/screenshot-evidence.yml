@@ -238,6 +238,24 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # The runner's DEFAULT Xcode (26.5) cannot build the vendored `fmt` pod: its clang rejects
+      # fmt's consteval format strings ("call to consteval function ... is not a constant
+      # expression"). Expensify pins Xcode 26.2 in .github/workflows/remote-build-ios.yml for
+      # exactly this reason — match their pin rather than patch a vendored dependency.
+      - name: Select Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          DEV="/Applications/Xcode_26.2.app/Contents/Developer"
+          if [ ! -d "$DEV" ]; then
+            # Fall back to the OLDEST installed Xcode 26: the failure is a too-NEW clang, so the
+            # newest image default is the one thing we know does not work.
+            echo "::warning::Xcode_26.2 is not on this image; falling back to the oldest Xcode 26"
+            DEV="$(ls -d /Applications/Xcode_26*.app | sort -V | head -1)/Contents/Developer"
+          fi
+          sudo xcode-select -s "$DEV"
+          echo "DEVELOPER_DIR=$DEV" >> "$GITHUB_ENV"
+          xcodebuild -version
+
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
