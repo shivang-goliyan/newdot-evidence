@@ -1,0 +1,135 @@
+# Measure real DOM geometry in a running NewDot build.
+#
+# The autopilot's investigations DERIVE the numbers a fix depends on. Deriving fails in exactly one
+# way: you drop a term. Expensify/App#95975 turned entirely on "is the receipt thumbnail >= 420px
+# from the viewport edge?" — one camp said 340 (= 320 sidebar + 20 margin, silently omitting the
+# 72px nav rail they had cited themselves), the other said 456. Nobody measured. The wrong camp's
+# refutation of the right fix went unchallenged, and we joined it.
+#
+# This is the cheap, mechanical antidote: boot the app, sign in, open a route, and hand back
+# getBoundingClientRect() for a list of selectors. It runs on GitHub Actions — free, 16GB — because
+# the autopilot VM has 2 cores and 12GB shared with live services and can never run the app itself.
+#
+# Generic on purpose: `route` + `selectors` are inputs, so any issue can use it without a new
+# workflow.
+name: measure
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Repo holding the branch (must be public)"
+        required: false
+        default: "Expensify/App"
+        type: string
+      target_ref:
+        description: "Branch or SHA to measure against"
+        required: false
+        default: "main"
+        type: string
+      route:
+        description: 'Route to open after sign-in, e.g. "/search?q=type:expense"'
+        required: true
+        type: string
+      selectors:
+        description: 'JSON: [{"name":"receipt","selector":"testid=receipt-cell"}]'
+        required: true
+        type: string
+      viewports:
+        description: 'JSON: [[1440,900],[1600,982],[2560,1440]]'
+        required: false
+        default: '[[1600,982]]'
+        type: string
+      settle_ms:
+        description: "ms to wait after navigation before measuring"
+        required: false
+        default: "4000"
+        type: string
+
+# Every run signs into the SAME account and polls the SAME inbox for a magic code. Two runs in
+# flight race: whichever polls first eats the code the other is waiting for, and the loser dies with
+# "no magic code within 180s" — which reads as a broken script but is really a collision. Serialising
+# is a correctness fix, not an optimisation. cancel-in-progress stays false: a queued run must WAIT,
+# never kill the one that is mid-sign-in.
+concurrency:
+  group: expensify-signin
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout CI scripts (this branch)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Checkout the app
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.target_ref }}
+          path: app
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: app/.nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      - name: Set up the dev host + certificate
+        working-directory: app
+        run: |
+          echo "127.0.0.1 dev.new.expensify.com" | sudo tee -a /etc/hosts
+          sudo apt-get update && sudo apt-get install -y libnss3-tools
+          curl -sJLO "https://dl.filippo.io/mkcert/latest?for=linux/amd64"
+          chmod +x mkcert-v*-linux-amd64
+          sudo mv mkcert-v*-linux-amd64 /usr/local/bin/mkcert
+          npm run setup-https
+
+      - name: Start the dev server
+        working-directory: app
+        run: |
+          npm run web > "${RUNNER_TEMP}/web.log" 2>&1 &
+          for i in $(seq 90); do
+            if curl -ksf https://dev.new.expensify.com:8082 > /dev/null; then
+              echo "dev server up after ${i}0s"; exit 0
+            fi
+            sleep 10
+          done
+          echo "dev server never came up:"; tail -50 "${RUNNER_TEMP}/web.log"; exit 1
+
+      - name: Install Playwright
+        working-directory: ci/scripts
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+
+      - name: Measure
+        working-directory: ci/scripts
+        env:
+          EXPENSIFY_EMAIL: ${{ secrets.EXPENSIFY_EMAIL }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_APP_PASSWORD: ${{ secrets.IMAP_APP_PASSWORD }}
+          ROUTE: ${{ inputs.route }}
+          SELECTORS: ${{ inputs.selectors }}
+          VIEWPORTS: ${{ inputs.viewports }}
+          SETTLE_MS: ${{ inputs.settle_ms }}
+          OUT_DIR: ${{ github.workspace }}/out
+        run: node measure.mjs
+
+      - name: Print the measurements
+        if: always()
+        run: cat "${{ github.workspace }}/out/measurements.json" || echo "(no measurements written)"
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: measurements-${{ inputs.target_ref }}
+          path: out/
