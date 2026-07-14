@@ -81,9 +81,9 @@ const discover = (page) =>
     return { count: ids.length, outline };
   });
 
-function fetchMagicCode(since) {
+function fetchMagicCode(since, timeoutS = 180) {
   const script = path.join(import.meta.dirname, "magic_code.py");
-  return execFileSync("python3", [script, "--since", String(since), "--timeout", "180"], {
+  return execFileSync("python3", [script, "--since", String(since), "--timeout", String(timeoutS)], {
     encoding: "utf8",
   }).trim();
 }
@@ -96,17 +96,49 @@ const context = await browser.newContext({
 const page = await context.newPage();
 const results = [];
 
+/**
+ * Sign in, retrying the magic-code REQUEST rather than giving up on the first one.
+ *
+ * The code is a single email. If it is throttled (Expensify rate-limits repeated requests to the
+ * same address, which we hit after several runs in an hour) or merely slow, a one-shot request
+ * throws away the whole ~13-minute run — we have already paid npm ci, the dev server and Playwright
+ * by this point. Ask again, wait longer each time. Cheap insurance against the one step that is
+ * outside our control.
+ */
+async function signIn() {
+  const waits = [180, 240, 300]; // seconds to wait for the code, per attempt
+  for (let i = 0; i < waits.length; i++) {
+    await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    const emailField = page.getByRole("textbox").first();
+    await emailField.waitFor({ state: "visible", timeout: 120_000 });
+    await emailField.fill(EMAIL);
+    const requestedAt = Date.now() / 1000;
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(2_000);
+
+    let code;
+    try {
+      code = fetchMagicCode(requestedAt, waits[i]);
+    } catch {
+      const backoff = 60 * (i + 1);
+      console.log(`no magic code within ${waits[i]}s (attempt ${i + 1}/${waits.length}) — ` +
+        `likely throttled; backing off ${backoff}s and requesting a fresh one`);
+      await page.waitForTimeout(backoff * 1000);
+      continue;
+    }
+    await page.keyboard.type(code, { delay: 120 });
+    await page.waitForSelector('[data-testid="BaseSidebarScreen"]', { timeout: 120_000 });
+    console.log(`signed in (attempt ${i + 1})`);
+    return;
+  }
+  throw new Error(
+    "could not sign in: no magic code after 3 requests. The account is almost certainly being " +
+    "rate-limited for magic codes — space the runs further apart.",
+  );
+}
+
 try {
-  await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 120_000 });
-  const emailField = page.getByRole("textbox").first();
-  await emailField.waitFor({ state: "visible", timeout: 120_000 });
-  await emailField.fill(EMAIL);
-  const requestedAt = Date.now() / 1000;
-  await page.keyboard.press("Enter");
-  await page.waitForTimeout(2_000);
-  await page.keyboard.type(fetchMagicCode(requestedAt), { delay: 120 });
-  await page.waitForSelector('[data-testid="BaseSidebarScreen"]', { timeout: 120_000 });
-  console.log("signed in");
+  await signIn();
 
   // Measure at EVERY requested viewport. A fix that turns on a threshold usually only flips at some
   // widths, so a single-width measurement can miss the case that actually matters.
