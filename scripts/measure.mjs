@@ -134,9 +134,26 @@ const results = [];
 async function signIn() {
   const waits = [180, 240, 300]; // seconds to wait for the code, per attempt
   for (let i = 0; i < waits.length; i++) {
-    await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 120_000 });
+    // The workflow's readiness probe is `curl` returning 200 — which only proves the dev SERVER is
+    // answering, not that the JS bundle has compiled and the app has rendered. On a cold cache the
+    // bundle can take minutes after the port opens, and the login form simply is not there yet.
+    // A single goto + waitFor therefore dies on a perfectly healthy server. Reload until the form
+    // actually appears; a reload is what picks up a bundle that finished after our first request.
     const emailField = page.getByRole("textbox").first();
-    await emailField.waitFor({ state: "visible", timeout: 120_000 });
+    let rendered = false;
+    for (let attempt = 0; attempt < 6 && !rendered; attempt++) {
+      await page.goto(APP_URL, { waitUntil: "domcontentloaded", timeout: 120_000 });
+      rendered = await emailField.waitFor({ state: "visible", timeout: 60_000 })
+        .then(() => true)
+        .catch(() => false);
+      if (!rendered) {
+        console.log(`login form not rendered yet (bundle still compiling?) — reload ${attempt + 1}/6`);
+      }
+    }
+    if (!rendered) {
+      throw new Error("the app never rendered its login form: the dev server answers but the JS " +
+        "bundle never finished compiling");
+    }
     await emailField.fill(EMAIL);
     const requestedAt = Date.now() / 1000;
     await page.keyboard.press("Enter");
