@@ -25,6 +25,12 @@ from email.utils import parsedate_to_datetime
 
 CODE_RE = re.compile(r"\b(\d{6})\b")
 
+# The email's Date header is stamped by the SENDER's clock; `--since` comes from ours. Without a
+# little slack, a small skew makes the fresh code look older than the request and it is rejected as
+# stale — the poller then spins for the whole timeout while the right email sits unread. A minute is
+# generous for skew and still far tighter than the gap to any previous run's code.
+SKEW_TOLERANCE_S = 60
+
 
 def _bodies(msg: email.message.Message):
     """Yield every text part of a message (plain and html)."""
@@ -43,9 +49,19 @@ def find_code(host: str, user: str, password: str, since: float, timeout: int) -
             with imaplib.IMAP4_SSL(host) as imap:
                 imap.login(user, password)
                 imap.select("INBOX")
-                # Server-side date filter is day-granular, so re-check each hit against
-                # `since` below — that's what actually rejects a stale code.
-                day = time.strftime("%d-%b-%Y", time.gmtime(since))
+                # Coarse server-side filter, deliberately widened by a day.
+                #
+                # IMAP SINCE matches on the message's INTERNALDATE as the SERVER reckons the date,
+                # which is not necessarily UTC. Asking for SINCE "<today in UTC>" therefore drops
+                # the message we want whenever we run just after midnight UTC and the server is on
+                # a timezone behind it — the mail sits in the inbox stamped "yesterday" and the
+                # search simply cannot see it. That is exactly what killed the 01:28 UTC run while
+                # the 22:58 and 23:50 runs the same evening both worked.
+                #
+                # So search from the day BEFORE and let the exact `arrived >= since` check below do
+                # the real work. The coarse filter only has to keep the fetch small; correctness
+                # comes from the timestamp comparison, not from this.
+                day = time.strftime("%d-%b-%Y", time.gmtime(since - 86400))
                 _, data = imap.search(None, f'(SINCE "{day}" FROM "expensify.com")')
                 for num in reversed((data[0] or b"").split()):
                     _, raw = imap.fetch(num, "(RFC822)")
@@ -56,7 +72,11 @@ def find_code(host: str, user: str, password: str, since: float, timeout: int) -
                         arrived = parsedate_to_datetime(msg["Date"]).timestamp()
                     except Exception:
                         continue
-                    if arrived < since:
+                    # The Date header comes from the SENDER's clock, and `since` from ours. A small
+                    # skew either way would otherwise reject the fresh code as "stale" and hang for
+                    # the whole timeout. Allow a minute of slack — still far too tight to let a code
+                    # from a previous run (minutes or hours old) slip through.
+                    if arrived < since - SKEW_TOLERANCE_S:
                         continue
                     subject = msg.get("Subject") or ""
                     haystack = subject + " " + " ".join(
