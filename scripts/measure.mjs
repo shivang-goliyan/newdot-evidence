@@ -81,6 +81,32 @@ const discover = (page) =>
     return { count: ids.length, outline };
   });
 
+/**
+ * Every direct child of <body>, with its box. Run WHILE hovering.
+ *
+ * A React portal — which is what ReceiptPreview is (`ReactDOM.createPortal(..., document.body)`) —
+ * mounts as a direct child of <body>, usually carries no testID, and only exists while the pointer
+ * is on its trigger. The pre-hover testid discovery therefore cannot see it, and any selector for it
+ * is a guess. Three guesses in a row silently matched the thumbnail instead, which is how you get a
+ * confidently wrong number. So: stop guessing, and photograph the DOM at the moment it exists.
+ */
+const portals = (page) =>
+  page.evaluate(() => {
+    return [...document.body.children].map((el, i) => {
+      const r = el.getBoundingClientRect();
+      const img = el.querySelector("img");
+      const ir = img?.getBoundingClientRect();
+      return {
+        index: i,
+        tag: el.tagName.toLowerCase(),
+        id: el.id || null,
+        testid: el.getAttribute("data-testid") || null,
+        rect: { left: Math.round(r.x), top: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+        img: ir ? { left: Math.round(ir.x), top: Math.round(ir.y), w: Math.round(ir.width), h: Math.round(ir.height) } : null,
+      };
+    });
+  });
+
 function fetchMagicCode(since, timeoutS = 180) {
   const script = path.join(import.meta.dirname, "magic_code.py");
   return execFileSync("python3", [script, "--since", String(since), "--timeout", String(timeoutS)], {
@@ -155,6 +181,7 @@ try {
       // case this was built for) a receipt hover-preview. Measuring the thing the bug is actually
       // about therefore requires driving the pointer first, so a selector may name an element to
       // hover before it is looked for.
+      let portalDump = null;
       if (hover) {
         const h = resolve(page, hover).first();
         if (await h.isVisible().catch(() => false)) {
@@ -163,6 +190,8 @@ try {
           // re-positions once its own height is measured. Measuring before that settles reads the
           // first-frame fallback position, not the final one.
           await page.waitForTimeout(hoverWaitMs ?? 2500);
+          // Snapshot the portal layer WHILE the pointer is still on the trigger.
+          portalDump = await portals(page);
         } else {
           console.log(`[${width}x${height}] ${name}: hover target "${hover}" not found`);
         }
@@ -191,7 +220,30 @@ try {
         missed++;
         results.push(entry);
         console.log(`[${width}x${height}] ${name}: NOT RENDERED (tried ${chain.join(" | ")})`);
+        if (portalDump) {
+          entry.portals = portalDump;
+          console.log(`      body's children while hovering (the portal is in here):`);
+          for (const p of portalDump) {
+            const im = p.img ? `  img@ left=${p.img.left} top=${p.img.top} ${p.img.w}x${p.img.h}` : "";
+            console.log(`        [${p.index}] <${p.tag}>${p.testid ? ` testid=${p.testid}` : ""} left=${p.rect.left} top=${p.rect.top} ${p.rect.w}x${p.rect.h}${im}`);
+          }
+        }
         continue;
+      }
+
+      // A hover target that resolved to the SAME box as another element is almost certainly a
+      // selector that fell through to the thing being hovered rather than the thing that appeared.
+      // Say so — a silently wrong number is worse than an honest miss, and this exact failure
+      // (matching the receipt thumbnail instead of its hover-preview) wasted two runs.
+      if (hover) {
+        const same = results.find(
+          (r) => r.rendered && r.name !== name && r.left === Math.round(box.x) &&
+                 r.top === Math.round(box.y) && r.width === Math.round(box.width),
+        );
+        if (same) {
+          entry.suspect = `identical box to "${same.name}" — the selector probably matched the hover TARGET, not the element that appeared on hover`;
+          console.log(`[${width}x${height}] ${name}: SUSPECT — same box as "${same.name}"; selector likely fell through`);
+        }
       }
       Object.assign(entry, {
         rendered: true,
@@ -202,6 +254,14 @@ try {
       });
       results.push(entry);
       console.log(`[${width}x${height}] ${name}: left=${entry.left} top=${entry.top} w=${entry.width} h=${entry.height}`);
+      if (entry.suspect && portalDump) {
+        entry.portals = portalDump;
+        console.log(`      body's children while hovering (the portal is in here):`);
+        for (const p of portalDump) {
+          const im = p.img ? `  img@ left=${p.img.left} top=${p.img.top} ${p.img.w}x${p.img.h}` : "";
+          console.log(`        [${p.index}] <${p.tag}>${p.testid ? ` testid=${p.testid}` : ""} left=${p.rect.left} top=${p.rect.top} ${p.rect.w}x${p.rect.h}${im}`);
+        }
+      }
       // Photograph a hover-only element WHILE it is still up — the pointer moves on the next
       // iteration and it vanishes. A number proves the position; the picture proves the number is
       // describing the thing everyone is arguing about.
