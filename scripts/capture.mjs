@@ -40,7 +40,7 @@ function fetchMagicCode(since) {
   const script = path.join(import.meta.dirname, "magic_code.py");
   return execFileSync(
     "python3",
-    [script, "--since", String(since), "--timeout", "180"],
+    [script, "--since", String(since), "--timeout", "360"],
     {
       encoding: "utf8",
     },
