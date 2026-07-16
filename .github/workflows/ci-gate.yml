@@ -9,9 +9,11 @@
 # TYPECHECK IS A DELTA, not an absolute: Expensify/App main is sometimes red on
 # `npm run typecheck` (observed live 2026-07-16: TS2304 in Policy/Member.ts on vanilla
 # main). An absolute check would fail every proof branch for upstream's breakage and
-# false-alarm the operator. So: typecheck the fix branch, typecheck upstream main in a
-# side worktree (sharing node_modules when the lockfile matches), and fail only on
-# errors the branch INTRODUCES.
+# false-alarm the operator. The baseline is HEAD^ — the exact commit the one-commit fix
+# branch was built on — NOT live upstream main, which moves between branch-cut and this
+# run and makes pre-existing errors look "introduced" via line drift (observed on the
+# first smoke: same TS2304, shifted line). Error strings are also normalised (line/col
+# stripped) so an edit above a pre-existing error in the same file can't fake a delta.
 #
 # lint-changed is deliberately omitted: it needs history the shallow checkout lacks;
 # typecheck + related jest are the gates that catch a broken change.
@@ -50,6 +52,7 @@ jobs:
         with:
           repository: ${{ inputs.source_repo }}
           ref: ${{ inputs.target_ref }}
+          fetch-depth: 2   # HEAD^ is the exact commit the fix was built on — the baseline
 
       - uses: actions/setup-node@v4
         with:
@@ -63,28 +66,21 @@ jobs:
         continue-on-error: true
         run: |
           set +e
-          npm run typecheck 2>&1 | tee /tmp/branch_tsc.log \
-            | grep -oE "[A-Za-z0-9_./-]+\([0-9]+,[0-9]+\): error TS[0-9]+" | sort -u > /tmp/branch_errors.txt
+          npm run typecheck 2>&1 \
+            | grep -oE "[A-Za-z0-9_./-]+\([0-9]+,[0-9]+\): error TS[0-9]+" \
+            | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u > /tmp/branch_errors.txt
           echo "branch errors: $(wc -l < /tmp/branch_errors.txt)"
 
-      - name: Typecheck upstream main (baseline, side worktree)
+      - name: Typecheck the baseline (HEAD^, side worktree)
         continue-on-error: true
-        env:
-          BASE_REPO: ${{ inputs.base_repo }}
         run: |
           set +e
-          git remote add upstream "https://github.com/${BASE_REPO}" 2>/dev/null || true
-          git fetch -q upstream main --depth=1
-          git worktree add --detach /tmp/mainwt FETCH_HEAD
-          if git diff --quiet FETCH_HEAD HEAD -- package-lock.json; then
-            ln -s "$PWD/node_modules" /tmp/mainwt/node_modules
-            (cd /tmp/mainwt && npm run typecheck 2>&1) \
-              | grep -oE "[A-Za-z0-9_./-]+\([0-9]+,[0-9]+\): error TS[0-9]+" | sort -u > /tmp/main_errors.txt
-            echo "main baseline errors: $(wc -l < /tmp/main_errors.txt)"
-          else
-            echo "package-lock differs from upstream main — baseline skipped, absolute mode"
-            : > /tmp/main_errors.txt
-          fi
+          git worktree add --detach /tmp/basewt HEAD^
+          ln -s "$PWD/node_modules" /tmp/basewt/node_modules
+          (cd /tmp/basewt && npm run typecheck 2>&1) \
+            | grep -oE "[A-Za-z0-9_./-]+\([0-9]+,[0-9]+\): error TS[0-9]+" \
+            | sed -E 's/\([0-9]+,[0-9]+\)//' | sort -u > /tmp/main_errors.txt
+          echo "baseline (HEAD^) errors: $(wc -l < /tmp/main_errors.txt)"
 
       - name: Related tests for the changed files
         continue-on-error: true
