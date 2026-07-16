@@ -1,0 +1,81 @@
+# Runs the repo's own merge gates (typecheck + related tests) against a fix branch, so a
+# PROPOSAL can carry "this exact change passes the gates" as a checkable receipt.
+#
+# Lives in newdot-evidence (not the App fork) for the same reason the other evidence
+# workflows do: it only needs to CHECK OUT the fix branch, so the fork stays clean — no
+# workflow files that could leak into a PR diff. Public repo => standard runners are free
+# and unlimited, with 16GB RAM (tsc on this repo peaks at several GB; the autopilot VM has
+# 2 cores / 12GB shared with live services and must never run this — the 2026-07-11 freeze
+# was exactly this class of work run inline).
+#
+# lint-changed is deliberately omitted: it diffs against main and needs history the shallow
+# checkout doesn't have; typecheck + related jest are the gates that catch a broken change.
+name: ci-gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Repo holding the fix branch (must be public)"
+        required: false
+        default: "shivang-goliyan/App"
+        type: string
+      target_ref:
+        description: "Branch or SHA of the fix"
+        required: true
+        type: string
+      changed_files:
+        description: "Space-separated repo-relative paths the fix touched (for related tests)"
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Checkout the fix branch
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.source_repo }}
+          ref: ${{ inputs.target_ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck (the CI merge gate)
+        id: typecheck
+        continue-on-error: true
+        run: npm run typecheck
+
+      - name: Related tests for the changed files
+        id: tests
+        continue-on-error: true
+        env:
+          CHANGED: ${{ inputs.changed_files }}
+        run: |
+          if [ -z "$CHANGED" ]; then
+            echo "no changed_files given — skipping related tests"
+            echo "TESTS_RESULT=skipped" >> "$GITHUB_ENV"
+          else
+            npx jest --findRelatedTests $CHANGED --no-coverage --ci --silent \
+              && echo "TESTS_RESULT=pass" >> "$GITHUB_ENV" \
+              || echo "TESTS_RESULT=fail" >> "$GITHUB_ENV"
+          fi
+
+      # One grep-friendly line the dispatcher parses out of the run logs (same pattern the
+      # measure workflow uses). The job FAILS on a red gate so the run conclusion is honest.
+      - name: Result
+        env:
+          TC: ${{ steps.typecheck.outcome }}
+          TR: ${{ env.TESTS_RESULT }}
+        run: |
+          TESTS="${TR:-skipped}"
+          echo "CIGATE: typecheck=$([ "$TC" = "success" ] && echo pass || echo fail) tests=$TESTS ref=${{ inputs.target_ref }}"
+          [ "$TC" = "success" ] && [ "$TESTS" != "fail" ]
