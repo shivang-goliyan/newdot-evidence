@@ -2,14 +2,19 @@
 # PROPOSAL can carry "this exact change passes the gates" as a checkable receipt.
 #
 # Lives in newdot-evidence (not the App fork) for the same reason the other evidence
-# workflows do: it only needs to CHECK OUT the fix branch, so the fork stays clean — no
-# workflow files that could leak into a PR diff. Public repo => standard runners are free
-# and unlimited, with 16GB RAM (tsc on this repo peaks at several GB; the autopilot VM has
-# 2 cores / 12GB shared with live services and must never run this — the 2026-07-11 freeze
-# was exactly this class of work run inline).
+# workflows do: it only needs to CHECK OUT the fix branch, so the fork stays clean. Public
+# repo => standard runners are free and unlimited, with 16GB RAM (tsc peaks at several GB;
+# the autopilot VM has 2 cores / 12GB shared with live services and must never run this).
 #
-# lint-changed is deliberately omitted: it diffs against main and needs history the shallow
-# checkout doesn't have; typecheck + related jest are the gates that catch a broken change.
+# TYPECHECK IS A DELTA, not an absolute: Expensify/App main is sometimes red on
+# `npm run typecheck` (observed live 2026-07-16: TS2304 in Policy/Member.ts on vanilla
+# main). An absolute check would fail every proof branch for upstream's breakage and
+# false-alarm the operator. So: typecheck the fix branch, typecheck upstream main in a
+# side worktree (sharing node_modules when the lockfile matches), and fail only on
+# errors the branch INTRODUCES.
+#
+# lint-changed is deliberately omitted: it needs history the shallow checkout lacks;
+# typecheck + related jest are the gates that catch a broken change.
 name: ci-gate
 
 on:
@@ -29,11 +34,16 @@ on:
         required: false
         default: ""
         type: string
+      base_repo:
+        description: "Upstream to diff typecheck errors against"
+        required: false
+        default: "Expensify/App"
+        type: string
 
 jobs:
   gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
       - name: Checkout the fix branch
         uses: actions/checkout@v4
@@ -49,17 +59,39 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck (the CI merge gate)
-        id: typecheck
+      - name: Typecheck the fix branch
         continue-on-error: true
-        run: npm run typecheck
+        run: |
+          set +e
+          npm run typecheck 2>&1 | tee /tmp/branch_tsc.log \
+            | grep -oE "[A-Za-z0-9_./-]+\([0-9]+,[0-9]+\): error TS[0-9]+" | sort -u > /tmp/branch_errors.txt
+          echo "branch errors: $(wc -l < /tmp/branch_errors.txt)"
+
+      - name: Typecheck upstream main (baseline, side worktree)
+        continue-on-error: true
+        env:
+          BASE_REPO: ${{ inputs.base_repo }}
+        run: |
+          set +e
+          git remote add upstream "https://github.com/${BASE_REPO}" 2>/dev/null || true
+          git fetch -q upstream main --depth=1
+          git worktree add --detach /tmp/mainwt FETCH_HEAD
+          if git diff --quiet FETCH_HEAD HEAD -- package-lock.json; then
+            ln -s "$PWD/node_modules" /tmp/mainwt/node_modules
+            (cd /tmp/mainwt && npm run typecheck 2>&1) \
+              | grep -oE "[A-Za-z0-9_./-]+\([0-9]+,[0-9]+\): error TS[0-9]+" | sort -u > /tmp/main_errors.txt
+            echo "main baseline errors: $(wc -l < /tmp/main_errors.txt)"
+          else
+            echo "package-lock differs from upstream main — baseline skipped, absolute mode"
+            : > /tmp/main_errors.txt
+          fi
 
       - name: Related tests for the changed files
-        id: tests
         continue-on-error: true
         env:
           CHANGED: ${{ inputs.changed_files }}
         run: |
+          set +e
           if [ -z "$CHANGED" ]; then
             echo "no changed_files given — skipping related tests"
             echo "TESTS_RESULT=skipped" >> "$GITHUB_ENV"
@@ -69,13 +101,20 @@ jobs:
               || echo "TESTS_RESULT=fail" >> "$GITHUB_ENV"
           fi
 
-      # One grep-friendly line the dispatcher parses out of the run logs (same pattern the
-      # measure workflow uses). The job FAILS on a red gate so the run conclusion is honest.
+      # One grep-friendly line the dispatcher parses out of the run logs. The job FAILS on
+      # a red delta so the run conclusion is honest.
       - name: Result
         env:
-          TC: ${{ steps.typecheck.outcome }}
           TR: ${{ env.TESTS_RESULT }}
         run: |
+          touch /tmp/branch_errors.txt /tmp/main_errors.txt
+          NEW=$(comm -23 /tmp/branch_errors.txt /tmp/main_errors.txt | wc -l)
+          BASE=$(wc -l < /tmp/main_errors.txt)
           TESTS="${TR:-skipped}"
-          echo "CIGATE: typecheck=$([ "$TC" = "success" ] && echo pass || echo fail) tests=$TESTS ref=${{ inputs.target_ref }}"
-          [ "$TC" = "success" ] && [ "$TESTS" != "fail" ]
+          TC=$([ "$NEW" -eq 0 ] && echo pass || echo fail)
+          echo "CIGATE: typecheck=$TC tests=$TESTS new_errors=$NEW baseline_errors=$BASE ref=${{ inputs.target_ref }}"
+          if [ "$NEW" -gt 0 ]; then
+            echo "--- errors introduced by the branch ---"
+            comm -23 /tmp/branch_errors.txt /tmp/main_errors.txt
+          fi
+          [ "$TC" = "pass" ] && [ "$TESTS" != "fail" ]
